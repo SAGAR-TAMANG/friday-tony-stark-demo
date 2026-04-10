@@ -22,18 +22,19 @@ from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.llm import mcp
 
 # Plugins
-from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, silero
+from livekit.plugins import google as lk_google, openai as lk_openai, groq as lk_groq, sarvam, silero
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
 
 STT_PROVIDER       = "sarvam"
-LLM_PROVIDER       = "gemini"
+LLM_PROVIDER       = "groq"
 TTS_PROVIDER       = "openai"
 
 GEMINI_LLM_MODEL   = "gemini-2.5-flash"
 OPENAI_LLM_MODEL   = "gpt-4o"
+GROQ_LLM_MODEL     = "llama-3.3-70b-versatile"
 
 OPENAI_TTS_MODEL   = "tts-1"
 OPENAI_TTS_VOICE   = "nova"       # "nova" has a clean, confident female tone
@@ -206,6 +207,9 @@ def _build_llm():
     elif LLM_PROVIDER == "gemini":
         logger.info("LLM → Google Gemini (%s)", GEMINI_LLM_MODEL)
         return lk_google.LLM(model=GEMINI_LLM_MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
+    elif LLM_PROVIDER == "groq":
+        logger.info("LLM → Groq (%s)", GROQ_LLM_MODEL)
+        return lk_groq.LLM(model=GROQ_LLM_MODEL, api_key=os.getenv("GROQ_API_KEY"))
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
 
