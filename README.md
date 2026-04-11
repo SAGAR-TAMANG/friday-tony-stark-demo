@@ -18,7 +18,7 @@ Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 ## How it works
 
 ```
-Microphone ──► STT (Sarvam Saaras v3)
+Microphone ──► STT (OpenAI Whisper)
                     │
                     ▼
              LLM (Gemini 2.5 Flash)  ◄──────► MCP Server (FastMCP / SSE)
@@ -119,8 +119,8 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `LIVEKIT_API_KEY` | ✅ | LiveKit Cloud → API Keys |
 | `LIVEKIT_API_SECRET` | ✅ | LiveKit Cloud → API Keys |
 | `GROQ_API_KEY` | optional | [console.groq.com](https://console.groq.com) — only needed if you switch `LLM_PROVIDER` to `"groq"` |
-| `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
-| `OPENAI_API_KEY` | ✅ (default TTS) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `SARVAM_API_KEY` | optional | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
+| `OPENAI_API_KEY` | ✅ (default STT + TTS) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
 | `DEEPGRAM_API_KEY` | optional | [console.deepgram.com](https://console.deepgram.com) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | optional | GCP service-account JSON path — only for `STT_PROVIDER = "google"` |
 | `GOOGLE_API_KEY` | ✅ (default LLM) | [aistudio.google.com](https://aistudio.google.com/projects) |
@@ -134,7 +134,7 @@ Copy `.env.example` → `.env` and fill in the values below.
 Open `agent_friday.py` and change the provider constants at the top:
 
 ```python
-STT_PROVIDER = "sarvam"   # "sarvam" | "whisper"
+STT_PROVIDER = "whisper"  # "sarvam" | "whisper"
 LLM_PROVIDER = "gemini"   # "gemini" | "openai"
 TTS_PROVIDER = "openai"   # "openai" | "sarvam"
 ```
@@ -155,7 +155,7 @@ The MCP server will pick it up on next start.
 
 - **[FastMCP](https://github.com/jlowin/fastmcp)** — MCP server framework
 - **[LiveKit Agents](https://github.com/livekit/agents)** — real-time voice pipeline
-- **Sarvam Saaras v3** — STT (Indian-English optimised)
+- **OpenAI Whisper** — STT
 - **Google Gemini 2.5 Flash** — LLM
 - **OpenAI TTS** (`nova` voice) — TTS
 - **[uv](https://github.com/astral-sh/uv)** — fast Python package manager

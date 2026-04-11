@@ -28,7 +28,7 @@ from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, si
 # CONFIG
 # ---------------------------------------------------------------------------
 
-STT_PROVIDER       = "sarvam"
+STT_PROVIDER       = "whisper"
 LLM_PROVIDER       = "gemini"
 TTS_PROVIDER       = "openai"
 
