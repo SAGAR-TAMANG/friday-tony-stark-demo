@@ -2,6 +2,8 @@
 Data resources — expose static content or dynamic data via MCP resources.
 """
 
+import datetime
+
 
 def register(mcp):
 
@@ -13,3 +15,8 @@ def register(mcp):
             "A Tony Stark-inspired AI assistant.\n"
             "Built with FastMCP."
         )
+    
+    @mcp.resource("friday://status")
+    def status():
+        """Returns MCSP server uptime."""
+        return f"Server running since {datetime.datetime.now()}"

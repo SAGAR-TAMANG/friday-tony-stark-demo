@@ -660,7 +660,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "httpx" },
-    { name = "livekit-agents", extra = ["deepgram", "groq", "openai", "sarvam", "silero"] },
+    { name = "livekit-agents", extra = ["openai", "sarvam", "silero"] },
     { name = "livekit-plugins-google" },
     { name = "python-dotenv" },
 ]
@@ -669,7 +669,7 @@ dependencies = [
 requires-dist = [
     { name = "fastmcp" },
     { name = "httpx" },
-    { name = "livekit-agents", extras = ["deepgram", "groq", "openai", "sarvam", "silero"], specifier = ">=1.5.1" },
+    { name = "livekit-agents", extras = ["openai", "sarvam", "silero"], specifier = ">=1.5.1" },
     { name = "livekit-plugins-google", specifier = ">=1.5.1" },
     { name = "python-dotenv" },
 ]
@@ -1276,12 +1276,6 @@ wheels = [
 codecs = [
     { name = "numpy" },
 ]
-deepgram = [
-    { name = "livekit-plugins-deepgram" },
-]
-groq = [
-    { name = "livekit-plugins-groq" },
-]
 images = [
     { name = "pillow" },
 ]
@@ -1344,19 +1338,6 @@ wheels = [
 ]
 
 [[package]]
-name = "livekit-plugins-deepgram"
-version = "1.5.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "livekit-agents", extra = ["codecs"] },
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/da/2f/a4e8175c9aa33334d0038fcb3441051c18d3fc6a72b5df98b9aa1c9c9ff7/livekit_plugins_deepgram-1.5.1.tar.gz", hash = "sha256:4dd5c03de55ba54e7f5190ed719553c5c8c4dfa78d2559580c693859ca0c5597", size = 16875, upload-time = "2026-03-23T22:51:37.575Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f5/36/15e848ccd8b176b65dd3d6483b8c11742cf015442ab227b048c0f4f62436/livekit_plugins_deepgram-1.5.1-py3-none-any.whl", hash = "sha256:5c78f1504bd78309395e99c3d55a04dfe5b255eba52ab31dc69061e5be9dfddf", size = 21909, upload-time = "2026-03-23T22:51:36.624Z" },
-]
-
-[[package]]
 name = "livekit-plugins-google"
 version = "1.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1370,20 +1351,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bc/b5/9c11ee9ec3417c9164f6c8635e26ea1189740a851ca3d79498df7c9dfe5c/livekit_plugins_google-1.5.1.tar.gz", hash = "sha256:d19f813bba9a7288723d3021b877728b2d5ff6c0d92f4af5089f7cf9dcb55374", size = 39924, upload-time = "2026-03-23T22:51:47.035Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/4a/6aeae692f90cea5409ae4bf021c7bba887ddd7c59b464112f1f975d29e31/livekit_plugins_google-1.5.1-py3-none-any.whl", hash = "sha256:588522998ed31a23eccd1bdabb6348f982c532177934722d8bef6faaaea94b01", size = 46554, upload-time = "2026-03-23T22:51:46.169Z" },
-]
-
-[[package]]
-name = "livekit-plugins-groq"
-version = "1.5.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "livekit" },
-    { name = "livekit-agents", extra = ["codecs", "openai"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/5f/b8384a17163ac516dd503b1c170aaaefea07bbeb53cd07f0113e1c4d38df/livekit_plugins_groq-1.5.1.tar.gz", hash = "sha256:168ebbeb011de2d5795a3fa2b5f16e763a8cc429aaecdd4a652a2c59a716ab82", size = 6096, upload-time = "2026-03-23T22:51:49.838Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/72/84ee947fd4192cb617f5cc2369c68a4025a0f6ebdba370eb29e9dbf0c6d1/livekit_plugins_groq-1.5.1-py3-none-any.whl", hash = "sha256:cf9bfa1f7e3ffb09a4504f287bb2f0c6965b615c71c5032a12e14484773d4af1", size = 7325, upload-time = "2026-03-23T22:51:49.053Z" },
 ]
 
 [[package]]
