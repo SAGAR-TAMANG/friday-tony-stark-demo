@@ -83,16 +83,53 @@ def register(mcp):
 
     @mcp.tool()
     async def search_web(query: str) -> str:
-        """Search the web for a given query and return a summary of results."""
-        return f"[stub] Search results for: {query}"
+        """Search the web for a query using DuckDuckGo and return a results summary."""
+        ddg_url = "https://api.duckduckgo.com/"
+        params = {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
+
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(ddg_url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        lines = [f"### Web results for: {query}\n"]
+
+        if abstract := data.get("AbstractText"):
+            lines.append(f"**Summary:** {abstract}")
+            if src := data.get("AbstractSource"):
+                lines.append(f"Source: {src} — {data.get('AbstractURL', '')}\n")
+
+        if answer := data.get("Answer"):
+            lines.append(f"**Direct answer:** {answer}\n")
+
+        topics = data.get("RelatedTopics", [])[:5]
+        if topics:
+            lines.append("**Related:**")
+            for t in topics:
+                if text := t.get("Text"):
+                    lines.append(f"- {text}")
+
+        if len(lines) == 1:
+            return f"No clear results for '{query}', sir. Try rephrasing."
+
+        return "\n".join(lines)
 
     @mcp.tool()
     async def fetch_url(url: str) -> str:
-        """Fetch the raw text content of a URL."""
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.text[:4000]
+        """
+        Fetch and return readable plain text from a URL, stripping all HTML tags.
+        Use when the boss asks to read a specific article or page.
+        """
+        headers = {"User-Agent": "Mozilla/5.0 (Friday-AI/2.0)"}
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10, headers=headers) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+        # Strip tags, collapse whitespace, cap length
+        text = re.sub(r"<[^>]+>", " ", resp.text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text[:3000] + ("\n\n[truncated]" if len(text) > 3000 else "")
     
     @mcp.tool()
     async def open_world_monitor() -> str:
