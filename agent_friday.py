@@ -29,11 +29,18 @@ from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, si
 # ---------------------------------------------------------------------------
 
 STT_PROVIDER       = "sarvam"
-LLM_PROVIDER       = "gemini"
+LLM_PROVIDER       = "gemini"   # "gemini" | "openai" | "ollama"
 TTS_PROVIDER       = "openai"
 
 GEMINI_LLM_MODEL   = "gemini-2.5-flash"
 OPENAI_LLM_MODEL   = "gpt-4o"
+
+# Ollama — runs locally; no API key needed.
+# Set OLLAMA_MODEL to any model you have pulled (e.g. llama3.2, gemma3, mistral).
+# OLLAMA_BASE_URL defaults to localhost:11434 but is auto-resolved to the
+# Windows host IP when the agent is running inside WSL.
+OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 OPENAI_TTS_MODEL   = "tts-1"
 OPENAI_TTS_VOICE   = "nova"       # "nova" has a clean, confident female tone
@@ -237,6 +244,20 @@ def _mcp_server_url() -> str:
     return url
 
 
+def _ollama_url() -> str:
+    """
+    Return the Ollama base URL, auto-replacing localhost/127.0.0.1 with the
+    Windows host IP when the agent is running inside WSL.
+    Ollama must be running on the host with its API port exposed (default 11434).
+    """
+    url = OLLAMA_BASE_URL
+    if "localhost" in url or "127.0.0.1" in url:
+        host_ip = _get_windows_host_ip()
+        url = url.replace("localhost", host_ip).replace("127.0.0.1", host_ip)
+    logger.info("Ollama URL: %s  model: %s", url, OLLAMA_MODEL)
+    return url
+
+
 # ---------------------------------------------------------------------------
 # Build provider instances
 # ---------------------------------------------------------------------------
@@ -265,6 +286,14 @@ def _build_llm():
     elif LLM_PROVIDER == "gemini":
         logger.info("LLM → Google Gemini (%s)", GEMINI_LLM_MODEL)
         return lk_google.LLM(model=GEMINI_LLM_MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
+    elif LLM_PROVIDER == "ollama":
+        # Ollama's OpenAI-compatible endpoint — no API key required.
+        # Ensure the model is pulled first: `ollama pull llama3.2`
+        return lk_openai.LLM(
+            model=OLLAMA_MODEL,
+            base_url=_ollama_url(),
+            api_key="ollama",          # required by the client lib; not validated
+        )
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
 
