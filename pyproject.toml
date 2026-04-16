@@ -11,6 +11,11 @@ dependencies = [
     "livekit-plugins-google>=1.5.1",
     "psutil>=5.9",
     "python-dotenv",
+    # fullvoice mode (mic -> STT -> LLM -> TTS) — see agent_friday.py `fullvoice`.
+    # tiny.en model auto-downloads to HF cache on first use (~75MB).
+    "faster-whisper>=1.0",
+    "sounddevice>=0.4",
+    "numpy>=1.24",
 ]
 # Note: `agent_friday.py voice` uses Windows built-in SAPI via a PowerShell
 # subprocess (System.Speech.Synthesis).  No extra Python dep required.
