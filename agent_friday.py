@@ -13,33 +13,46 @@ Run:
 """
 
 import os
+import sys
 import logging
 import subprocess
+import httpx
+
+# Force UTF-8 on Windows (cp1252 can't encode emojis used by LiveKit/rich)
+os.environ.setdefault("PYTHONUTF8", "1")
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
+
+# Load .env BEFORE reading any os.getenv() constants so env vars are available
+load_dotenv()
+
 from livekit.agents import JobContext, WorkerOptions, cli
 from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.llm import mcp
+from livekit.agents.types import APIConnectOptions
 
 # Plugins
 from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, silero
 
 # ---------------------------------------------------------------------------
-# CONFIG
+# CONFIG  (all os.getenv calls happen after load_dotenv() above)
 # ---------------------------------------------------------------------------
 
 STT_PROVIDER       = "sarvam"
-LLM_PROVIDER       = "gemini"   # "gemini" | "openai" | "ollama"
+LLM_PROVIDER       = "ollama"   # "gemini" | "openai" | "ollama"
 TTS_PROVIDER       = "openai"
 
 GEMINI_LLM_MODEL   = "gemini-2.5-flash"
 OPENAI_LLM_MODEL   = "gpt-4o"
 
 # Ollama — runs locally; no API key needed.
-# Set OLLAMA_MODEL to any model you have pulled (e.g. llama3.2, gemma3, mistral).
-# OLLAMA_BASE_URL defaults to localhost:11434 but is auto-resolved to the
-# Windows host IP when the agent is running inside WSL.
-OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3.2")
+# Set OLLAMA_MODEL in .env to any pulled model (llama3.1:latest, gemma4, qwen3:8b…)
+OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3.1:latest")
 OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 OPENAI_TTS_MODEL   = "tts-1"
@@ -196,8 +209,6 @@ Behavior:
 # Bootstrap
 # ---------------------------------------------------------------------------
 
-load_dotenv()
-
 logger = logging.getLogger("friday-agent")
 logger.setLevel(logging.INFO)
 
@@ -279,6 +290,25 @@ def _build_stt():
         raise ValueError(f"Unknown STT_PROVIDER: {STT_PROVIDER!r}")
 
 
+def _patch_llm_conn_options(llm_instance, *, timeout: float = 120.0):
+    """
+    Wrap llm.chat() so every call uses a generous conn_options.
+    APIConnectOptions is a frozen dataclass — the only way to override its
+    10-second default is to pass conn_options explicitly at each call site.
+    """
+    _opts = APIConnectOptions(timeout=timeout, max_retry=3, retry_interval=2.0)
+    _original_chat = llm_instance.chat
+
+    def _chat_with_timeout(**kwargs):
+        # Only inject if caller didn't supply their own conn_options
+        kwargs.setdefault("conn_options", _opts)
+        return _original_chat(**kwargs)
+
+    llm_instance.chat = _chat_with_timeout
+    logger.info("LLM chat() patched: conn_options.timeout=%.0fs", timeout)
+    return llm_instance
+
+
 def _build_llm():
     if LLM_PROVIDER == "openai":
         logger.info("LLM → OpenAI (%s)", OPENAI_LLM_MODEL)
@@ -288,12 +318,17 @@ def _build_llm():
         return lk_google.LLM(model=GEMINI_LLM_MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
     elif LLM_PROVIDER == "ollama":
         # Ollama's OpenAI-compatible endpoint — no API key required.
-        # Ensure the model is pulled first: `ollama pull llama3.2`
-        return lk_openai.LLM(
+        # Two separate timeouts to fix:
+        #   1. httpx read timeout (default 5s) — pass explicit httpx.Timeout
+        #   2. APIConnectOptions.timeout (default 10s, frozen dataclass) — wrap chat()
+        _timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
+        llm = lk_openai.LLM(
             model=OLLAMA_MODEL,
             base_url=_ollama_url(),
-            api_key="ollama",          # required by the client lib; not validated
+            api_key="ollama",          # required by client lib; not validated
+            timeout=_timeout,
         )
+        return _patch_llm_conn_options(llm, timeout=120.0)
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
 
@@ -318,33 +353,86 @@ def _build_tts():
 # Agent
 # ---------------------------------------------------------------------------
 
+def _is_console_mode() -> bool:
+    """True when the agent is launched with the 'console' subcommand (text-only, no audio)."""
+    return "console" in sys.argv
+
+
+_GREETING = "Greetings boss, you're awake late at night today. What you up to?"
+
+# Tokens in system-prompt + MCP tool schemas can exceed 5 000 on CPU-only hardware,
+# making Ollama's prefill take 5-10 min. We bypass the LLM for the opening line so
+# the session feels instant, then Ollama handles all real user questions.
+_GREETING_INSTRUCTION_FRAGMENT = "Greet the user exactly with"
+
+
 class FridayAgent(Agent):
     """
     F.R.I.D.A.Y. – Iron Man-style voice assistant.
     All tools are provided via the MCP server on the Windows host.
+    In console mode STT/TTS/VAD are omitted so no cloud audio keys are needed.
     """
 
-    def __init__(self, stt, llm, tts) -> None:
-        super().__init__(
-            instructions=SYSTEM_PROMPT,
-            stt=stt,
-            llm=llm,
-            tts=tts,
-            vad=silero.VAD.load(),
-            mcp_servers=[
+    def __init__(self, llm, stt=None, tts=None) -> None:
+        self._audio_enabled = tts is not None  # track before super().__init__
+        kwargs: dict = {
+            "instructions": SYSTEM_PROMPT,
+            "llm": llm,
+            "mcp_servers": [
                 mcp.MCPServerHTTP(
                     url=_mcp_server_url(),
                     transport_type="sse",
                     client_session_timeout_seconds=30,
                 ),
             ],
-        )
+        }
+        # Audio pipeline — only when STT/TTS are available (i.e. not console mode)
+        if stt:
+            kwargs["stt"] = stt
+            kwargs["vad"] = silero.VAD.load()
+        if tts:
+            kwargs["tts"] = tts
+        super().__init__(**kwargs)
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        """
+        Override so the greeting bypasses Ollama entirely.
+        CPU-only inference needs 5-10 min for a 5k-token prompt; the opening
+        line is canned so the session feels instant.  All real questions go
+        through Ollama as normal.
+        """
+        from livekit.agents.types import NOT_GIVEN
+
+        # Detect the greeting instruction injected by on_enter()
+        msgs = chat_ctx.messages()
+        last_msg = msgs[-1] if msgs else None
+        last_text = getattr(last_msg, "content", "") or ""
+        if _GREETING_INSTRUCTION_FRAGMENT in last_text:
+            logger.info("Greeting shortcut — skipping Ollama prefill")
+            yield _GREETING
+            return
+
+        # All other turns: use the real LLM with the session's conn_options
+        activity = self._get_activity_or_raise()
+        conn_opts = activity.session.conn_options.llm_conn_options
+        tool_choice = model_settings.tool_choice if model_settings else NOT_GIVEN
+        async with activity.llm.chat(
+            chat_ctx=chat_ctx,
+            tools=tools,
+            tool_choice=tool_choice,
+            conn_options=conn_opts,
+        ) as stream:
+            async for chunk in stream:
+                yield chunk
 
     async def on_enter(self) -> None:
-        """Greet the user specifically for the late-night lab session."""
+        """Greet the user on session start."""
+        # Disable audio BEFORE generating the first reply so TTS is never invoked
+        if not self._audio_enabled:
+            self.session.output.set_audio_enabled(False)
         await self.session.generate_reply(
             instructions=(
-                "Greet the user exactly with: 'Greetings boss, you're awake late at night today. What you up to?' "
+                f"{_GREETING_INSTRUCTION_FRAGMENT}: '{_GREETING}' "
                 "Maintain a helpful but dry tone."
             )
         )
@@ -363,22 +451,35 @@ def _endpointing_delay() -> float:
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    logger.info(
-        "FRIDAY online – room: %s | STT=%s | LLM=%s | TTS=%s",
-        ctx.room.name, STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER,
-    )
-
-    stt = _build_stt()
+    console = _is_console_mode()
+    stt = None if console else _build_stt()
     llm = _build_llm()
-    tts = _build_tts()
+    tts = None if console else _build_tts()
 
-    session = AgentSession(
-        turn_detection=_turn_detection(),
-        min_endpointing_delay=_endpointing_delay(),
+    logger.info(
+        "FRIDAY online – mode: %s | STT=%s | LLM=%s | TTS=%s",
+        "console" if console else "voice",
+        STT_PROVIDER if stt else "none",
+        LLM_PROVIDER,
+        TTS_PROVIDER if tts else "none",
     )
+
+    # Generous LLM timeout — local models (Ollama) need 120-300s on CPU-only hardware
+    # because token prefill scales with context length (system prompt + tool schemas).
+    _llm_timeout = 300.0 if LLM_PROVIDER == "ollama" else 30.0
+    _llm_opts = APIConnectOptions(timeout=_llm_timeout, max_retry=0)
+
+    session_kwargs: dict = {
+        "conn_options": SessionConnectOptions(llm_conn_options=_llm_opts),
+    }
+    if not console:
+        session_kwargs["turn_detection"] = _turn_detection()
+        session_kwargs["min_endpointing_delay"] = _endpointing_delay()
+
+    session = AgentSession(**session_kwargs)
 
     await session.start(
-        agent=FridayAgent(stt=stt, llm=llm, tts=tts),
+        agent=FridayAgent(llm=llm, stt=stt, tts=tts),
         room=ctx.room,
     )
 
@@ -392,7 +493,6 @@ def main():
 
 def dev():
     """Wrapper to run the agent in dev mode automatically."""
-    import sys
     # If no command was provided, inject 'dev'
     if len(sys.argv) == 1:
         sys.argv.append("dev")
