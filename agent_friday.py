@@ -549,15 +549,148 @@ async def _run_repl() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Voice REPL  — text-in, voice-out. FRIDAY *speaks* her replies via Windows
+# SAPI (pyttsx3).  Zero cloud keys, zero model downloads — the voice engine
+# ships with Windows.  STT is still text-typed; add faster-whisper later for
+# a full mic→STT→LLM→TTS→speaker loop.
+# ---------------------------------------------------------------------------
+
+async def _run_voice() -> None:
+    import asyncio
+    from livekit.agents.llm import ChatContext
+
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    # TTS via a persistent PowerShell daemon.
+    # Rationale: pyttsx3 + asyncio.to_thread deadlocks on Windows (SAPI needs
+    # an STA COM apartment; asyncio workers are MTA).  Spawning one PS process
+    # per utterance works but pays ~15s .NET JIT per spawn.  A single long-
+    # lived daemon amortizes startup, then each utterance is a stdin write +
+    # blocking .Speak() + sentinel echo for sync.
+    DAEMON_SCRIPT = (
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$s.Rate = 1;"
+        "foreach ($v in $s.GetInstalledVoices()) {"
+        "  if ($v.VoiceInfo.Name -like '*Zira*') {"
+        "    $s.SelectVoice($v.VoiceInfo.Name); break"
+        "  }"
+        "};"
+        "[Console]::Out.WriteLine('READY');"
+        "while (($line = [Console]::In.ReadLine()) -ne $null) {"
+        "  if ($line -eq '__EXIT__') { break };"
+        "  $s.Speak($line);"
+        "  [Console]::Out.WriteLine('DONE')"
+        "}"
+    )
+
+    print("[tts] starting SAPI daemon (one-time ~5s .NET init)...", flush=True)
+    tts_proc = await asyncio.create_subprocess_exec(
+        "powershell.exe", "-NoProfile", "-Command", DAEMON_SCRIPT,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    # Wait for READY line so we don't race the first .Speak()
+    ready = await tts_proc.stdout.readline()
+    if ready.strip() != b"READY":
+        print("[tts] daemon failed to start — falling back to silent mode")
+        tts_proc = None
+
+    async def speak(text: str) -> None:
+        if not text or tts_proc is None or tts_proc.stdin is None:
+            return
+        # Collapse whitespace and strip problematic chars for a single stdin line
+        line = " ".join(text.split())
+        tts_proc.stdin.write((line + "\n").encode("utf-8", errors="replace"))
+        await tts_proc.stdin.drain()
+        # Wait for DONE sentinel so REPL prompt doesn't reappear mid-speech
+        await tts_proc.stdout.readline()
+
+    async def shutdown_tts() -> None:
+        if tts_proc and tts_proc.stdin:
+            try:
+                tts_proc.stdin.write(b"__EXIT__\n")
+                await tts_proc.stdin.drain()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(tts_proc.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                tts_proc.kill()
+
+    print()
+    print("=" * 60)
+    print("  F.R.I.D.A.Y. — voice REPL  (TTS: Windows SAPI / Zira | LLM: %s)" % LLM_PROVIDER)
+    print("  type your question — FRIDAY will type AND speak the reply")
+    print("  type 'exit' / 'quit' / Ctrl-C to leave")
+    print("=" * 60)
+
+    llm = _build_llm()
+    conn_opts = APIConnectOptions(timeout=300.0, max_retry=0, retry_interval=2.0)
+
+    ctx = ChatContext()
+    ctx.add_message(role="system", content=SYSTEM_PROMPT)
+
+    print()
+    print("friday> " + _GREETING)
+    ctx.add_message(role="assistant", content=_GREETING)
+    await speak(_GREETING)
+
+    while True:
+        try:
+            user_input = input("\nyou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nfriday> signing off, boss.")
+            await speak("signing off, boss.")
+            await shutdown_tts()
+            return
+
+        if not user_input:
+            continue
+        if user_input.lower() in {"exit", "quit", "bye", ":q"}:
+            print("friday> signing off, boss.")
+            await speak("signing off, boss.")
+            await shutdown_tts()
+            return
+
+        ctx.add_message(role="user", content=user_input)
+
+        print("friday> ", end="", flush=True)
+        chunks: list[str] = []
+        try:
+            async with llm.chat(chat_ctx=ctx, conn_options=conn_opts) as stream:
+                async for chunk in stream:
+                    delta = getattr(chunk, "delta", None)
+                    content = getattr(delta, "content", None) if delta else None
+                    if content:
+                        print(content, end="", flush=True)
+                        chunks.append(content)
+            print()
+        except Exception as exc:
+            print(f"\n[llm error: {exc}]")
+            continue
+
+        full = "".join(chunks).strip()
+        if full:
+            ctx.add_message(role="assistant", content=full)
+            await speak(full)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    # Route 'repl' subcommand to our text REPL BEFORE handing off to LiveKit's
-    # cli.run_app, which would reject an unknown subcommand.
+    # Route 'repl' / 'voice' subcommands BEFORE LiveKit's cli.run_app takes
+    # over, because cli.run_app would reject any unknown subcommand.
     if len(sys.argv) > 1 and sys.argv[1] == "repl":
         import asyncio
         asyncio.run(_run_repl())
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "voice":
+        import asyncio
+        asyncio.run(_run_voice())
         return
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 

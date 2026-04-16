@@ -12,6 +12,8 @@ dependencies = [
     "psutil>=5.9",
     "python-dotenv",
 ]
+# Note: `agent_friday.py voice` uses Windows built-in SAPI via a PowerShell
+# subprocess (System.Speech.Synthesis).  No extra Python dep required.
 
 [project.scripts]
 friday = "server:main"
