@@ -485,10 +485,80 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Text REPL  — bypasses LiveKit console mode entirely.
+# LiveKit's `console` subcommand hooks a mic/speaker pipeline by default and is
+# awkward for pure-text Ollama sessions.  `repl` drives the same patched LLM
+# with plain input()/print() so you get an instant greeting and a normal shell.
+# ---------------------------------------------------------------------------
+
+async def _run_repl() -> None:
+    import asyncio  # noqa: F401 — used by caller
+    from livekit.agents.llm import ChatContext
+
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    print()
+    print("=" * 60)
+    print("  F.R.I.D.A.Y. — text REPL  (LLM: %s | model: %s)" % (LLM_PROVIDER, OLLAMA_MODEL))
+    print("  type 'exit' / 'quit' / Ctrl-C to leave")
+    print("=" * 60)
+
+    llm = _build_llm()  # inherits httpx + APIConnectOptions timeout fixes
+    conn_opts = APIConnectOptions(timeout=300.0, max_retry=0, retry_interval=2.0)
+
+    ctx = ChatContext()
+    ctx.add_message(role="system", content=SYSTEM_PROMPT)
+
+    # Canned greeting — no LLM call, instant UX
+    print()
+    print("friday> " + _GREETING)
+    ctx.add_message(role="assistant", content=_GREETING)
+
+    while True:
+        try:
+            user_input = input("\nyou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nfriday> signing off, boss.")
+            return
+
+        if not user_input:
+            continue
+        if user_input.lower() in {"exit", "quit", "bye", ":q"}:
+            print("friday> signing off, boss.")
+            return
+
+        ctx.add_message(role="user", content=user_input)
+
+        print("friday> ", end="", flush=True)
+        chunks: list[str] = []
+        try:
+            async with llm.chat(chat_ctx=ctx, conn_options=conn_opts) as stream:
+                async for chunk in stream:
+                    delta = getattr(chunk, "delta", None)
+                    content = getattr(delta, "content", None) if delta else None
+                    if content:
+                        print(content, end="", flush=True)
+                        chunks.append(content)
+            print()
+        except Exception as exc:
+            print(f"\n[llm error: {exc}]")
+            continue
+
+        full = "".join(chunks).strip()
+        if full:
+            ctx.add_message(role="assistant", content=full)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    # Route 'repl' subcommand to our text REPL BEFORE handing off to LiveKit's
+    # cli.run_app, which would reject an unknown subcommand.
+    if len(sys.argv) > 1 and sys.argv[1] == "repl":
+        import asyncio
+        asyncio.run(_run_repl())
+        return
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 
 def dev():
