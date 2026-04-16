@@ -65,6 +65,22 @@ SARVAM_TTS_SPEAKER  = "rahul"
 # MCP server running on Windows host
 MCP_SERVER_PORT = 8000
 
+# Tool allowlist for REPL / voice modes.  Small models + CPU can't afford
+# 18 tool schemas in prefill — set FRIDAY_TOOLS=* (or "all") to expose all,
+# or CSV override to customize.  Default: 6 demo-critical tools → ~60s prefill.
+_DEFAULT_TOOLS = (
+    "get_current_time,get_weather,get_stock_price,"
+    "search_web,get_world_news,get_system_diagnostics"
+)
+FRIDAY_TOOLS = os.getenv("FRIDAY_TOOLS", _DEFAULT_TOOLS)
+
+
+def _tool_allowlist() -> list[str] | None:
+    raw = FRIDAY_TOOLS.strip()
+    if raw in {"*", "all", ""}:
+        return None  # expose all
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
 # ---------------------------------------------------------------------------
 # System prompt – F.R.I.D.A.Y.
 # ---------------------------------------------------------------------------
@@ -321,7 +337,9 @@ def _build_llm():
         # Two separate timeouts to fix:
         #   1. httpx read timeout (default 5s) — pass explicit httpx.Timeout
         #   2. APIConnectOptions.timeout (default 10s, frozen dataclass) — wrap chat()
-        _timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
+        # read=600s — prefill with 18-tool schema on CPU measured at ~170s cold.
+        # KV cache amortizes subsequent calls, but first tool turn needs headroom.
+        _timeout = httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=15.0)
         llm = lk_openai.LLM(
             model=OLLAMA_MODEL,
             base_url=_ollama_url(),
@@ -485,6 +503,84 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared chat driver with tool-calling.
+# LiveKit streams text content AND partial tool-call deltas over the same
+# ChatChunk iterator.  We collect both, then if tool calls landed, dispatch
+# them via the MCP client, append FunctionCall + FunctionCallOutput items to
+# the ChatContext, and re-invoke llm.chat() so the model can continue with
+# the tool results in context.  Capped at 4 iterations as a runaway guard.
+# ---------------------------------------------------------------------------
+
+async def _chat_with_tools(
+    llm,
+    ctx,
+    tools,
+    dispatch,
+    conn_opts,
+    on_text,
+    *,
+    max_iters: int = 4,
+) -> str:
+    from livekit.agents.llm import FunctionCall, FunctionCallOutput
+
+    full_text_parts: list[str] = []
+
+    for _ in range(max_iters):
+        iter_text: list[str] = []
+        # call_id -> {"name": str, "arguments": str}
+        tool_calls: dict[str, dict] = {}
+
+        chat_kwargs = {"chat_ctx": ctx, "conn_options": conn_opts}
+        if tools:
+            chat_kwargs["tools"] = tools
+
+        async with llm.chat(**chat_kwargs) as stream:
+            async for chunk in stream:
+                delta = getattr(chunk, "delta", None)
+                if delta is None:
+                    continue
+                if delta.content:
+                    on_text(delta.content)
+                    iter_text.append(delta.content)
+                # Deltas may carry partial tool calls — merge by call_id.
+                for tc in (delta.tool_calls or []):
+                    slot = tool_calls.setdefault(tc.call_id, {"name": "", "arguments": ""})
+                    if tc.name:
+                        slot["name"] = tc.name
+                    if tc.arguments:
+                        slot["arguments"] += tc.arguments
+
+        text_this_iter = "".join(iter_text).strip()
+        if text_this_iter:
+            full_text_parts.append(text_this_iter)
+
+        if not tool_calls:
+            break  # plain text answer — we're done
+
+        # Record the assistant's tool-call intent, then each tool's result.
+        items = []
+        for call_id, info in tool_calls.items():
+            items.append(FunctionCall(
+                call_id=call_id,
+                name=info["name"],
+                arguments=info["arguments"],
+            ))
+        ctx.insert(items)
+
+        for call_id, info in tool_calls.items():
+            on_text(f"\n[tool: {info['name']}({info['arguments'][:80]})]\n")
+            result = await dispatch(info["name"], info["arguments"])
+            ctx.insert(FunctionCallOutput(
+                call_id=call_id,
+                name=info["name"],
+                output=result,
+                is_error=False,
+            ))
+
+    return "\n".join(full_text_parts).strip()
+
+
+# ---------------------------------------------------------------------------
 # Text REPL  — bypasses LiveKit console mode entirely.
 # LiveKit's `console` subcommand hooks a mic/speaker pipeline by default and is
 # awkward for pure-text Ollama sessions.  `repl` drives the same patched LLM
@@ -494,6 +590,7 @@ async def entrypoint(ctx: JobContext) -> None:
 async def _run_repl() -> None:
     import asyncio  # noqa: F401 — used by caller
     from livekit.agents.llm import ChatContext
+    from friday_mcp import open_mcp
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     print()
@@ -503,7 +600,18 @@ async def _run_repl() -> None:
     print("=" * 60)
 
     llm = _build_llm()  # inherits httpx + APIConnectOptions timeout fixes
-    conn_opts = APIConnectOptions(timeout=300.0, max_retry=0, retry_interval=2.0)
+    conn_opts = APIConnectOptions(timeout=600.0, max_retry=0, retry_interval=2.0)
+
+    # Connect to the MCP server for tools.  Fails soft — if the server is
+    # down, the REPL still works as a plain chat.
+    mcp_client = None
+    tools = []
+    dispatch = None
+    try:
+        mcp_client, tools, dispatch = await open_mcp(_mcp_server_url(), allow=_tool_allowlist())
+        print(f"[mcp] {len(tools)} tools loaded from {_mcp_server_url()}")
+    except Exception as exc:
+        print(f"[mcp] unavailable ({exc}) — running without tools")
 
     ctx = ChatContext()
     ctx.add_message(role="system", content=SYSTEM_PROMPT)
@@ -513,39 +621,41 @@ async def _run_repl() -> None:
     print("friday> " + _GREETING)
     ctx.add_message(role="assistant", content=_GREETING)
 
-    while True:
-        try:
-            user_input = input("\nyou> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nfriday> signing off, boss.")
-            return
+    def _emit(s: str) -> None:
+        print(s, end="", flush=True)
 
-        if not user_input:
-            continue
-        if user_input.lower() in {"exit", "quit", "bye", ":q"}:
-            print("friday> signing off, boss.")
-            return
+    try:
+        while True:
+            try:
+                user_input = input("\nyou> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nfriday> signing off, boss.")
+                return
 
-        ctx.add_message(role="user", content=user_input)
+            if not user_input:
+                continue
+            if user_input.lower() in {"exit", "quit", "bye", ":q"}:
+                print("friday> signing off, boss.")
+                return
 
-        print("friday> ", end="", flush=True)
-        chunks: list[str] = []
-        try:
-            async with llm.chat(chat_ctx=ctx, conn_options=conn_opts) as stream:
-                async for chunk in stream:
-                    delta = getattr(chunk, "delta", None)
-                    content = getattr(delta, "content", None) if delta else None
-                    if content:
-                        print(content, end="", flush=True)
-                        chunks.append(content)
-            print()
-        except Exception as exc:
-            print(f"\n[llm error: {exc}]")
-            continue
+            ctx.add_message(role="user", content=user_input)
 
-        full = "".join(chunks).strip()
-        if full:
-            ctx.add_message(role="assistant", content=full)
+            print("friday> ", end="", flush=True)
+            try:
+                full = await _chat_with_tools(llm, ctx, tools, dispatch, conn_opts, _emit)
+                print()
+            except Exception as exc:
+                print(f"\n[llm error: {exc}]")
+                continue
+
+            if full:
+                ctx.add_message(role="assistant", content=full)
+    finally:
+        if mcp_client is not None:
+            try:
+                await mcp_client.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +668,7 @@ async def _run_repl() -> None:
 async def _run_voice() -> None:
     import asyncio
     from livekit.agents.llm import ChatContext
+    from friday_mcp import open_mcp
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -627,7 +738,17 @@ async def _run_voice() -> None:
     print("=" * 60)
 
     llm = _build_llm()
-    conn_opts = APIConnectOptions(timeout=300.0, max_retry=0, retry_interval=2.0)
+    conn_opts = APIConnectOptions(timeout=600.0, max_retry=0, retry_interval=2.0)
+
+    # Connect to MCP for tool calling (soft-fail).
+    mcp_client = None
+    tools = []
+    dispatch = None
+    try:
+        mcp_client, tools, dispatch = await open_mcp(_mcp_server_url(), allow=_tool_allowlist())
+        print(f"[mcp] {len(tools)} tools loaded from {_mcp_server_url()}")
+    except Exception as exc:
+        print(f"[mcp] unavailable ({exc}) — running without tools")
 
     ctx = ChatContext()
     ctx.add_message(role="system", content=SYSTEM_PROMPT)
@@ -637,44 +758,45 @@ async def _run_voice() -> None:
     ctx.add_message(role="assistant", content=_GREETING)
     await speak(_GREETING)
 
-    while True:
-        try:
-            user_input = input("\nyou> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nfriday> signing off, boss.")
-            await speak("signing off, boss.")
-            await shutdown_tts()
-            return
+    def _emit(s: str) -> None:
+        print(s, end="", flush=True)
 
-        if not user_input:
-            continue
-        if user_input.lower() in {"exit", "quit", "bye", ":q"}:
-            print("friday> signing off, boss.")
-            await speak("signing off, boss.")
-            await shutdown_tts()
-            return
+    try:
+        while True:
+            try:
+                user_input = input("\nyou> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nfriday> signing off, boss.")
+                await speak("signing off, boss.")
+                return
 
-        ctx.add_message(role="user", content=user_input)
+            if not user_input:
+                continue
+            if user_input.lower() in {"exit", "quit", "bye", ":q"}:
+                print("friday> signing off, boss.")
+                await speak("signing off, boss.")
+                return
 
-        print("friday> ", end="", flush=True)
-        chunks: list[str] = []
-        try:
-            async with llm.chat(chat_ctx=ctx, conn_options=conn_opts) as stream:
-                async for chunk in stream:
-                    delta = getattr(chunk, "delta", None)
-                    content = getattr(delta, "content", None) if delta else None
-                    if content:
-                        print(content, end="", flush=True)
-                        chunks.append(content)
-            print()
-        except Exception as exc:
-            print(f"\n[llm error: {exc}]")
-            continue
+            ctx.add_message(role="user", content=user_input)
 
-        full = "".join(chunks).strip()
-        if full:
-            ctx.add_message(role="assistant", content=full)
-            await speak(full)
+            print("friday> ", end="", flush=True)
+            try:
+                full = await _chat_with_tools(llm, ctx, tools, dispatch, conn_opts, _emit)
+                print()
+            except Exception as exc:
+                print(f"\n[llm error: {exc}]")
+                continue
+
+            if full:
+                ctx.add_message(role="assistant", content=full)
+                await speak(full)
+    finally:
+        if mcp_client is not None:
+            try:
+                await mcp_client.close()
+            except Exception:
+                pass
+        await shutdown_tts()
 
 
 # ---------------------------------------------------------------------------
