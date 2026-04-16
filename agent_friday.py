@@ -665,10 +665,18 @@ async def _run_repl() -> None:
 # a full mic→STT→LLM→TTS→speaker loop.
 # ---------------------------------------------------------------------------
 
-async def _run_voice() -> None:
+async def _run_voice(voice_input: bool = False) -> None:
+    """Voice REPL.  voice_input=True adds mic-based PTT via faster-whisper."""
     import asyncio
     from livekit.agents.llm import ChatContext
     from friday_mcp import open_mcp
+
+    # STT loaded lazily — only if voice_input requested.
+    whisper = None
+    if voice_input:
+        from friday_stt import load_whisper, record_until_enter, transcribe
+        print("[stt] loading whisper (first run downloads ~75MB)...", flush=True)
+        whisper = load_whisper("tiny.en")
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -732,9 +740,13 @@ async def _run_voice() -> None:
 
     print()
     print("=" * 60)
-    print("  F.R.I.D.A.Y. — voice REPL  (TTS: Windows SAPI / Zira | LLM: %s)" % LLM_PROVIDER)
-    print("  type your question — FRIDAY will type AND speak the reply")
-    print("  type 'exit' / 'quit' / Ctrl-C to leave")
+    mode = "fullvoice (mic -> STT -> LLM -> TTS)" if voice_input else "voice (text -> LLM -> TTS)"
+    print(f"  F.R.I.D.A.Y. — {mode}  (LLM: {LLM_PROVIDER})")
+    if voice_input:
+        print("  press ENTER to talk, ENTER again to stop.  type 'exit' to quit.")
+    else:
+        print("  type your question — FRIDAY will type AND speak the reply")
+        print("  type 'exit' / 'quit' / Ctrl-C to leave")
     print("=" * 60)
 
     llm = _build_llm()
@@ -761,10 +773,27 @@ async def _run_voice() -> None:
     def _emit(s: str) -> None:
         print(s, end="", flush=True)
 
+    async def _read_turn() -> str:
+        """Get the next user turn — mic or keyboard depending on voice_input."""
+        if not voice_input:
+            return input("\nyou> ").strip()
+        # Offload blocking record+transcribe so the event loop stays responsive.
+        print()
+        audio = await asyncio.to_thread(record_until_enter)
+        if audio.size == 0:
+            return ""
+        print("[stt] transcribing...", flush=True)
+        text = await asyncio.to_thread(transcribe, whisper, audio)
+        if text:
+            print(f"you> {text}")
+        else:
+            print("[stt] (no speech detected)")
+        return text.strip()
+
     try:
         while True:
             try:
-                user_input = input("\nyou> ").strip()
+                user_input = await _read_turn()
             except (EOFError, KeyboardInterrupt):
                 print("\nfriday> signing off, boss.")
                 await speak("signing off, boss.")
@@ -812,7 +841,11 @@ def main():
         return
     if len(sys.argv) > 1 and sys.argv[1] == "voice":
         import asyncio
-        asyncio.run(_run_voice())
+        asyncio.run(_run_voice(voice_input=False))
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "fullvoice":
+        import asyncio
+        asyncio.run(_run_voice(voice_input=True))
         return
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
 
