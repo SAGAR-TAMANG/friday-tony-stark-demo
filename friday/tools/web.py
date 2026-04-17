@@ -1,111 +1,111 @@
 """
-Web tools — search, fetch pages, and global news briefings.
+Web tools — real-time web search and URL fetching.
+News moved to friday/tools/news.py (GDELT + RSS fallback).
 """
 
-import httpx
-import xml.etree.ElementTree as ET
-import asyncio  # Required for parallel execution
+import os
 import re
-from datetime import datetime
 
-SEED_FEEDS = [
-    'https://feeds.bbci.co.uk/news/world/rss.xml',
-    'https://www.cnbc.com/id/100727362/device/rss/rss.html',
-    'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
-    'https://www.aljazeera.com/xml/rss/all.xml'
-]
+import httpx
 
-async def fetch_and_parse_feed(client, url):
-    """Helper function to handle a single feed request and parse its XML."""
-    try:
-        response = await client.get(url, headers={'User-Agent': 'Friday-AI/1.0'}, timeout=5.0)
-        if response.status_code != 200:
-            return []
 
-        root = ET.fromstring(response.content)
-        # Extract source name from URL (e.g., 'BBC' or 'NYTIMES')
-        source_name = url.split('.')[1].upper()
-        
-        feed_items = []
-        # Get top 5 items per feed
-        items = root.findall(".//item")[:5]
-        for item in items:
-            title = item.findtext("title")
-            description = item.findtext("description")
-            link = item.findtext("link")
-            
-            if description:
-                description = re.sub('<[^<]+?>', '', description).strip()
-
-            feed_items.append({
-                "source": source_name,
-                "title": title,
-                "summary": description[:200] + "..." if description else "",
-                "link": link
-            })
-        return feed_items
-    except Exception:
-        # If one feed fails, return an empty list so others can still succeed
+async def _search_tavily(query: str, n: int) -> list[dict]:
+    api_key = os.getenv("TAVILY_API_KEY", "")
+    if not api_key:
         return []
+    async with httpx.AsyncClient(timeout=8) as client:
+        r = await client.post(
+            "https://api.tavily.com/search",
+            json={"api_key": api_key, "query": query, "max_results": n, "search_depth": "basic"},
+        )
+        r.raise_for_status()
+        data = r.json()
+    return [
+        {"title": h.get("title", ""), "url": h.get("url", ""), "snippet": h.get("content", "")[:240]}
+        for h in data.get("results", [])[:n]
+    ]
+
+
+async def _search_brave(query: str, n: int) -> list[dict]:
+    api_key = os.getenv("BRAVE_API_KEY", "")
+    if not api_key:
+        return []
+    async with httpx.AsyncClient(timeout=8) as client:
+        r = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": n},
+            headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        )
+        r.raise_for_status()
+        data = r.json()
+    return [
+        {"title": h.get("title", ""), "url": h.get("url", ""), "snippet": h.get("description", "")[:240]}
+        for h in data.get("web", {}).get("results", [])[:n]
+    ]
+
+
+async def _search_ddg(query: str, n: int) -> list[dict]:
+    # DuckDuckGo HTML endpoint — no key, async-friendly.
+    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        r = await client.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={"User-Agent": "Friday-AI/2.0"},
+        )
+        r.raise_for_status()
+    pattern = re.compile(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
+        r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    hits = []
+    for url, title, snippet in pattern.findall(r.text)[:n]:
+        clean = lambda s: re.sub(r"<[^>]+>", "", s).strip()
+        hits.append({"title": clean(title), "url": url, "snippet": clean(snippet)[:240]})
+    return hits
+
+
+async def _run_search(query: str, n: int) -> list[dict]:
+    for backend in (_search_tavily, _search_brave, _search_ddg):
+        try:
+            hits = await backend(query, n)
+            if hits:
+                return hits
+        except Exception:
+            continue
+    return []
+
 
 def register(mcp):
 
     @mcp.tool()
-    async def get_world_news() -> str:
+    async def search_web(query: str, max_results: int = 5) -> str:
         """
-        Fetches the latest global headlines from major news outlets simultaneously.
-        Use this when the user asks 'What's going on in the world?' or for recent events.
+        Search the web for a query. Returns ranked snippets.
+        Backend order: Tavily → Brave → DuckDuckGo. Uses whichever key is present.
         """
-        
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-            # 1. Create a list of 'tasks' (one for each URL)
-            tasks = [fetch_and_parse_feed(client, url) for url in SEED_FEEDS]
-            
-            # 2. Fire them all at once and wait for the results
-            # results will be a list of lists: [[news from bbc], [news from nyt], ...]
-            results_of_lists = await asyncio.gather(*tasks)
-            
-            # 3. Flatten the list of lists into a single list of articles
-            all_articles = [item for sublist in results_of_lists for item in sublist]
-
-        if not all_articles:
-            return "The global news grid is unresponsive, sir. I'm unable to pull headlines."
-
-        # 4. Format the final briefing
-        report = ["### GLOBAL NEWS BRIEFING (LIVE)\n"]
-        # Limit to top 12 items so the AI doesn't get overwhelmed
-        for entry in all_articles[:12]:
-            report.append(f"**[{entry['source']}]** {entry['title']}")
-            report.append(f"{entry['summary']}")
-            report.append(f"Link: {entry['link']}\n")
-
-        return "\n".join(report)
-
-    @mcp.tool()
-    async def search_web(query: str) -> str:
-        """Search the web for a given query and return a summary of results."""
-        return f"[stub] Search results for: {query}"
+        hits = await _run_search(query, max_results)
+        if not hits:
+            return f"Search came back empty for: {query!r}."
+        lines = [f"Search results for '{query}':\n"]
+        for i, r in enumerate(hits, 1):
+            lines.append(f"[{i}] {r['title']}\n    {r['snippet']}\n    {r['url']}")
+        return "\n".join(lines)
 
     @mcp.tool()
     async def fetch_url(url: str) -> str:
-        """Fetch the raw text content of a URL."""
+        """Fetch the raw text content of a URL (truncated to 4000 chars)."""
         async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
             response = await client.get(url)
             response.raise_for_status()
             return response.text[:4000]
-    
+
     @mcp.tool()
     async def open_world_monitor() -> str:
-        """
-        Opens the World Monitor dashboard (worldmonitor.app) in the system's web browser.
-        Use this when the user wants a visual overview of global events or a real-time map.
-        """
+        """Open the worldmonitor.app dashboard in the local browser for a visual overview."""
         import webbrowser
-        url = "https://worldmonitor.app/"
-        
         try:
-            # This opens the URL in the default browser (Chrome/Edge/Safari)
-            webbrowser.open(url)
-            return "Displaying the World Monitor on your primary screen now, sir."
+            webbrowser.open("https://worldmonitor.app/")
+            return "Displaying the World Monitor on your primary screen now, boss."
         except Exception as e:
-            return f"I'm unable to initialize the visual monitor: {str(e)}"
+            return f"Unable to initialize the visual monitor: {e}"
