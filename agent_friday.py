@@ -13,6 +13,7 @@ Run:
 """
 
 import os
+import re
 import sys
 import logging
 import subprocess
@@ -717,6 +718,37 @@ async def _run_repl() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Streaming TTS helper — speaks sentences as they arrive from the LLM stream.
+# WHY: buffering the entire reply then speaking adds 15-60s of silence on CPU.
+# Running a consumer task in parallel with generation means the user hears the
+# first sentence ~3-5s after asking, while the model keeps producing the rest.
+# ---------------------------------------------------------------------------
+
+_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+
+async def _speak_streaming(
+    tts_queue: "asyncio.Queue[str | None]",
+    speak,
+) -> None:
+    """Drain tts_queue and speak sentence-by-sentence until None sentinel."""
+    buf = ""
+    while True:
+        chunk = await tts_queue.get()
+        if chunk is None:
+            if buf.strip():
+                await speak(buf.strip())
+            return
+        buf += chunk
+        parts = _SENT_SPLIT.split(buf)
+        if len(parts) > 1:
+            for sentence in parts[:-1]:
+                if sentence.strip():
+                    await speak(sentence.strip())
+            buf = parts[-1]
+
+
+# ---------------------------------------------------------------------------
 # Voice REPL  — text-in, voice-out. FRIDAY *speaks* her replies via Windows
 # SAPI (pyttsx3).  Zero cloud keys, zero model downloads — the voice engine
 # ships with Windows.  STT is still text-typed; add faster-whisper later for
@@ -880,16 +912,33 @@ async def _run_voice(voice_input: bool = False) -> None:
             ctx.add_message(role="user", content=user_input)
 
             print("friday> ", end="", flush=True)
+            # Stream tokens to a queue so TTS speaks sentence-by-sentence in
+            # parallel with generation — first word audible ~3s, not ~60s.
+            tts_queue: asyncio.Queue = asyncio.Queue()
+            consumer = asyncio.create_task(_speak_streaming(tts_queue, speak))
+
+            def _emit_stream(s: str) -> None:
+                _emit(s)
+                # Skip [tool: ...] markers — display-only, not for speech
+                if "[tool:" not in s:
+                    tts_queue.put_nowait(s)
+
             try:
-                full = await _chat_with_tools(llm, ctx, tools, dispatch, conn_opts, _emit)
+                full = await _chat_with_tools(
+                    llm, ctx, tools, dispatch, conn_opts, _emit_stream
+                )
                 print()
             except Exception as exc:
                 print(f"\n[llm error: {exc}]")
+                tts_queue.put_nowait(None)
+                await consumer
                 continue
+
+            tts_queue.put_nowait(None)  # signal consumer: generation done
+            await consumer              # wait for last sentence to finish
 
             if full:
                 ctx.add_message(role="assistant", content=full)
-                await speak(full)
     finally:
         if mcp_client is not None:
             try:
