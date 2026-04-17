@@ -57,6 +57,10 @@ MCP_TRANSPORT   = os.getenv("MCP_TRANSPORT", "streamable-http")  # "streamable-h
 MCP_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "8000"))
 MCP_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "127.0.0.1")
 
+# Opt-in: bootstrap friday.core (memory + persistence + orchestrator) on session start.
+# When false (default), the voice agent behaves exactly as before.
+USE_ORCHESTRATOR = os.getenv("USE_ORCHESTRATOR", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # System prompt – F.R.I.D.A.Y.
 # ---------------------------------------------------------------------------
@@ -362,8 +366,35 @@ def _endpointing_delay() -> float:
     return {"sarvam": 0.07, "whisper": 0.3}.get(STT_PROVIDER, 0.1)
 
 
+def _maybe_bootstrap_core() -> None:
+    """Boot friday.core subsystems when USE_ORCHESTRATOR=true. No-op otherwise."""
+    if not USE_ORCHESTRATOR:
+        return
+    # Lazy imports so the default voice path never pays the core cost.
+    try:
+        from pathlib import Path
+        from friday.config import config
+        from friday.core import (
+            AgentOrchestrator, DatabaseManager, MemoryManager, DEFAULT_AGENTS,
+        )
+    except ImportError as exc:
+        logger.warning("USE_ORCHESTRATOR=true but friday.core import failed: %s", exc)
+        return
+    home = Path(config.FRIDAY_HOME).expanduser()
+    memory = MemoryManager(
+        episodes_path=home / "episodes",
+        memory_file=Path(config.FRIDAY_MEMORY_PATH).expanduser(),
+    )
+    db = DatabaseManager(base_path=config.FRIDAY_DB_PATH)
+    orch = AgentOrchestrator(memory_manager=memory, db_manager=db)
+    for agent_def in DEFAULT_AGENTS.values():
+        orch.register_agent(agent_def)
+    logger.info("Orchestrator online | agents=%d home=%s", len(orch.agents), home)
+
+
 async def entrypoint(ctx: JobContext) -> None:
     logger.info("FRIDAY online – room: %s | VOICE_MODE=%s", ctx.room.name, VOICE_MODE)
+    _maybe_bootstrap_core()
 
     if VOICE_MODE.startswith("realtime"):
         agent = FridayAgent(realtime_llm=_build_realtime())
