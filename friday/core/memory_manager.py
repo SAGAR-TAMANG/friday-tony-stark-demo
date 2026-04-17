@@ -49,7 +49,7 @@ class MemoryManager:
     def get_working_context(self, max_chars: int = 8000, last_n: int = 20) -> str:
         """Get recent working memory as context string."""
         recent = self.working[-last_n:]
-        lines = [f"{m['role']}: {m['content'][:500]}" for m in recent]
+        lines = [f"{m['role']}: {m['content']}" for m in recent]
         text = "\n".join(lines)
         return text[-max_chars:] if len(text) > max_chars else text
 
