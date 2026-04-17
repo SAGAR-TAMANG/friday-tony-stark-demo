@@ -51,8 +51,10 @@ GEMINI_LLM_MODEL   = "gemini-2.5-flash"
 OPENAI_LLM_MODEL   = "gpt-4o"
 
 # Ollama — runs locally; no API key needed.
-# Set OLLAMA_MODEL in .env to any pulled model (llama3.1:latest, gemma4, qwen3:8b…)
-OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "llama3.1:latest")
+# Set OLLAMA_MODEL in .env to any pulled model — qwen2.5:7b-instruct is the
+# default because it emits proper structured tool_calls via Ollama's OpenAI-compat
+# layer.  llama3.1:latest emits tool calls as raw text (broken on Ollama 0.3+).
+OLLAMA_MODEL       = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 OPENAI_TTS_MODEL   = "tts-1"
@@ -170,13 +172,14 @@ Warm. Slightly curious. Very FRIDAY.
 ## Behavioral Rules
 
 1. Call tools silently and immediately — never say "I'm going to call..." Just do it.
-2. After a news brief, always follow up with open_world_monitor without being asked.
-3. Keep all spoken responses short — two to four sentences maximum.
-4. No bullet points, no markdown, no lists. You are speaking, not writing.
-5. Stay in character. You are F.R.I.D.A.Y. You are not an AI assistant — you are Stark's AI. Act like it.
-6. Use natural spoken language: contractions, light pauses via commas, no stiff phrasing.
-7. Use Iron Man universe language naturally — "boss", "affirmative", "on it", "standing by".
-8. If a tool fails, report it calmly: "News feed's unresponsive right now, boss. Want me to try again?"
+2. For ANY question that requires live data — time, date, weather, prices, news, system health, calculations — call the relevant tool. Never answer these from training memory.
+3. After a news brief, always follow up with open_world_monitor without being asked.
+4. Keep all spoken responses short — two to four sentences maximum.
+5. No bullet points, no markdown, no lists. You are speaking, not writing.
+6. Stay in character. You are F.R.I.D.A.Y. You are not an AI assistant — you are Stark's AI. Act like it.
+7. Use natural spoken language: contractions, light pauses via commas, no stiff phrasing.
+8. Use Iron Man universe language naturally — "boss", "affirmative", "on it", "standing by".
+9. If a tool fails, report it calmly: "News feed's unresponsive right now, boss. Want me to try again?"
 
 ---
 
@@ -201,6 +204,16 @@ Trigger phrases:
 Behavior:
 - Confirm saves briefly: "Got it. Noted."
 - When listing, summarize — don't read them verbatim robotically.
+
+### get_current_time — Live Time & Date
+Returns the actual current time and date from the system clock.
+
+Trigger phrases:
+- "What time is it?" / "What's the time?" / "Current time" / "What's today's date?" / "What day is it?"
+
+Behavior:
+- Call the tool silently. Never answer time/date questions from memory — always use this tool.
+- Example: "It's 11:42 PM on a Thursday, boss."
 
 ### calculate — Math
 Evaluates any arithmetic expression safely: +, -, *, /, **, sqrt(), sin(), cos(), log(), pi, e…
@@ -580,6 +593,44 @@ async def _chat_with_tools(
     return "\n".join(full_text_parts).strip()
 
 
+async def _prewarm_llm(llm, ctx, tools, conn_opts) -> float:
+    """
+    Prime Ollama's KV cache with the system prompt + tool schemas.
+
+    Sends one throwaway chat over a *copy* of the real ChatContext with a
+    trivial user message and drains the stream to completion.  Ollama's
+    OpenAI-compat backend prefix-caches KV by token sequence, so the real
+    first turn reuses ~2000-2500 tokens of prefill and only has to run
+    the new user-message + generation.
+
+    WHY full drain (not early break): closing the stream mid-response can
+    cause Ollama to abort without persisting the KV cache, defeating the
+    purpose.  Completing the request guarantees the prefix is cached.
+
+    Returns elapsed seconds so the caller can report it.  Failures are
+    swallowed — a flaky prewarm must never block the demo.
+    """
+    import time
+
+    try:
+        warm_ctx = ctx.copy()
+        # "say ok" is minimal — 2-token response from most tool-tuned models,
+        # keeps total prewarm cost close to prefill-only without risking the
+        # model deciding to emit a tool call for something substantive.
+        warm_ctx.add_message(role="user", content="reply with exactly: ok")
+        chat_kwargs = {"chat_ctx": warm_ctx, "conn_options": conn_opts}
+        if tools:
+            chat_kwargs["tools"] = tools
+
+        t0 = time.time()
+        async with llm.chat(**chat_kwargs) as stream:
+            async for _chunk in stream:
+                pass  # drain fully so Ollama commits the KV cache
+        return time.time() - t0
+    except Exception:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Text REPL  — bypasses LiveKit console mode entirely.
 # LiveKit's `console` subcommand hooks a mic/speaker pipeline by default and is
@@ -620,6 +671,13 @@ async def _run_repl() -> None:
     print()
     print("friday> " + _GREETING)
     ctx.add_message(role="assistant", content=_GREETING)
+
+    # Prewarm Ollama's KV cache with system + tools + greeting prefix so the
+    # real first user turn only has to prefill the user message + generation.
+    if tools:
+        print("[warmup] priming model cache (first run: ~60-180s)...", flush=True)
+        elapsed = await _prewarm_llm(llm, ctx, tools, conn_opts)
+        print(f"[warmup] done in {elapsed:.1f}s — next turn should be snappy")
 
     def _emit(s: str) -> None:
         print(s, end="", flush=True)
@@ -768,7 +826,20 @@ async def _run_voice(voice_input: bool = False) -> None:
     print()
     print("friday> " + _GREETING)
     ctx.add_message(role="assistant", content=_GREETING)
-    await speak(_GREETING)
+
+    # Overlap TTS of the greeting with model prewarm — SAPI runs in a
+    # separate PowerShell process, Ollama in another, so they don't contend.
+    # By the time the greeting finishes speaking (~5s), the KV cache is
+    # usually primed, making the first user turn feel instant.
+    if tools:
+        print("[warmup] priming model cache in parallel with greeting...", flush=True)
+        _, elapsed = await asyncio.gather(
+            speak(_GREETING),
+            _prewarm_llm(llm, ctx, tools, conn_opts),
+        )
+        print(f"[warmup] model cache ready ({elapsed:.1f}s)")
+    else:
+        await speak(_GREETING)
 
     def _emit(s: str) -> None:
         print(s, end="", flush=True)
