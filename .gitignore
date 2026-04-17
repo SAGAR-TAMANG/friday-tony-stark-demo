@@ -173,4 +173,13 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+# Local scratch/test artifacts
+.repl_input.txt
+.repl_out.txt
+.mcp_server.log
+agent.log
+agent.err.log
+mcp.log
+mcp.err.log
+
 # End of https://www.toptal.com/developers/gitignore/api/python
