@@ -35,12 +35,14 @@ from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, si
 VOICE_MODE = os.getenv("VOICE_MODE", "pipeline")
 
 STT_PROVIDER = os.getenv("STT_PROVIDER", "sarvam")   # "sarvam" | "whisper" | "openai"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")   # "gemini" | "openai"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")   # "gemini" | "openai" | "ollama"
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "openai")   # "openai" | "sarvam"
 
 # April-2026 current model IDs. Bump these as new models ship.
 GEMINI_LLM_MODEL   = os.getenv("GEMINI_LLM_MODEL", "gemini-2.5-pro")
 OPENAI_LLM_MODEL   = os.getenv("OPENAI_LLM_MODEL", "gpt-4.1")
+OLLAMA_LLM_MODEL   = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
+OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 GEMINI_REALTIME_MODEL = os.getenv("GEMINI_REALTIME_MODEL", "gemini-2.5-flash-live")
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
 
@@ -239,6 +241,9 @@ def _build_llm():
     elif LLM_PROVIDER == "gemini":
         logger.info("LLM → Google Gemini (%s)", GEMINI_LLM_MODEL)
         return lk_google.LLM(model=GEMINI_LLM_MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
+    elif LLM_PROVIDER == "ollama":
+        logger.info("LLM → Ollama (%s @ %s)", OLLAMA_LLM_MODEL, OLLAMA_BASE_URL)
+        return lk_openai.LLM.with_ollama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
 
