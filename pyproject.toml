@@ -3,7 +3,7 @@ name = "friday-tony-stark-demo"
 version = "0.2.0"
 description = "Friday — A Tony Stark-inspired personal AI (MCP server + LiveKit voice agent)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     # MCP server
     "mcp>=1.8",
@@ -12,8 +12,8 @@ dependencies = [
     "httpx>=0.27",
     "feedparser>=6.0",
     # Voice agent
-    "livekit-agents[deepgram,groq,openai,sarvam,silero]>=1.6.0",
-    "livekit-plugins-google>=1.6.0",
+    "livekit-agents[deepgram,groq,openai,sarvam,silero]>=1.5,<1.6",
+    "livekit-plugins-google>=1.5,<1.6",
     "livekit-plugins-noise-cancellation>=0.2",
     "livekit-plugins-turn-detector>=1.0",
     # Real-time data tools
