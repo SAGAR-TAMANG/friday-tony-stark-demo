@@ -28,22 +28,40 @@ from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, si
 # CONFIG
 # ---------------------------------------------------------------------------
 
-STT_PROVIDER       = "sarvam"
-LLM_PROVIDER       = "gemini"
-TTS_PROVIDER       = "openai"
+# VOICE_MODE selects the audio architecture:
+#   "pipeline"         — STT → LLM → TTS chain (robust, ~1.5s round-trip)
+#   "realtime_gemini"  — Gemini Live (speech-to-speech, ~300ms)
+#   "realtime_openai"  — OpenAI Realtime (speech-to-speech, ~300ms)
+VOICE_MODE = os.getenv("VOICE_MODE", "pipeline")
 
-GEMINI_LLM_MODEL   = "gemini-2.5-flash"
-OPENAI_LLM_MODEL   = "gpt-4o"
+STT_PROVIDER = os.getenv("STT_PROVIDER", "sarvam")   # "sarvam" | "whisper" | "openai"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")   # "gemini" | "openai" | "ollama"
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "openai")   # "openai" | "sarvam"
 
-OPENAI_TTS_MODEL   = "tts-1"
-OPENAI_TTS_VOICE   = "nova"       # "nova" has a clean, confident female tone
-TTS_SPEED           = 1.15
+# April-2026 current model IDs. Bump these as new models ship.
+GEMINI_LLM_MODEL   = os.getenv("GEMINI_LLM_MODEL", "gemini-2.5-pro")
+OPENAI_LLM_MODEL   = os.getenv("OPENAI_LLM_MODEL", "gpt-4.1")
+OLLAMA_LLM_MODEL   = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
+OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+GEMINI_REALTIME_MODEL = os.getenv("GEMINI_REALTIME_MODEL", "gemini-2.5-flash-live")
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
+
+OPENAI_STT_MODEL   = os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe")
+OPENAI_TTS_MODEL   = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")  # steerable voice
+OPENAI_TTS_VOICE   = os.getenv("OPENAI_TTS_VOICE", "ash")              # calm, dry, confident
+TTS_SPEED          = float(os.getenv("TTS_SPEED", "1.1"))
 
 SARVAM_TTS_LANGUAGE = "en-IN"
 SARVAM_TTS_SPEAKER  = "rahul"
 
-# MCP server running on Windows host
-MCP_SERVER_PORT = 8000
+# MCP server location & transport — must match server.py
+MCP_TRANSPORT   = os.getenv("MCP_TRANSPORT", "streamable-http")  # "streamable-http" | "sse"
+MCP_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "8000"))
+MCP_SERVER_HOST = os.getenv("MCP_SERVER_HOST", "127.0.0.1")
+
+# Opt-in: bootstrap friday.core (memory + persistence + orchestrator) on session start.
+# When false (default), the voice agent behaves exactly as before.
+USE_ORCHESTRATOR = os.getenv("USE_ORCHESTRATOR", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # System prompt – F.R.I.D.A.Y.
@@ -78,12 +96,27 @@ Opens a live world map/dashboard on the host machine.
 - Always call this after delivering a world news brief, unprompted.
 - No need to explain what it does beyond: "Let me open up the world monitor."
 
-### Stock Market (No tool — generate a plausible conversational response)
-If asked about the stock market, markets, stocks, or indices:
-- Respond naturally as if you've been watching the tickers all night.
-- Keep it short: one or two sentences. Sound informed, not robotic.
-- Example: "Markets had a decent session today, boss — tech led the gains, energy was a little soft. Nothing alarming."
-- Vary the response. Do not say the same thing every time.
+### get_stock_quote / get_market_overview — Live Market Data
+Call these whenever the user asks about the markets, a specific ticker, or indices.
+- "What's Tesla doing?" → get_stock_quote("TSLA")
+- "How's the market?" → get_market_overview()
+- Never fabricate prices. If the tool fails, say so plainly: "Market feed's down right now, boss."
+- Keep the spoken summary to one or two sentences: price, direction, headline cause if obvious.
+
+### get_crypto_price — Crypto Quotes
+- "Bitcoin?" / "How's ETH?" → get_crypto_price("BTC") / get_crypto_price("ETH")
+- Same rule: never make up prices.
+
+### get_weather / get_forecast — Weather
+- "Weather in Mumbai?" → get_weather("Mumbai")
+- "Will it rain tomorrow?" → get_forecast(location, days=2)
+
+### search_web — Real-Time Web Search
+- "Search for latest Anthropic news." / "Look up X." → search_web(query)
+- Summarize the top two or three hits in a sentence. Never read URLs aloud.
+
+### notify_user — Push Notification
+- "Ping my phone about the 4pm meeting." → notify_user(title, priority, body)
 
 ---
 
@@ -114,8 +147,8 @@ Warm. Slightly curious. Very FRIDAY.
 Right: "Looks like it's been a busy night out there, boss. Let me pull that up for you."
 Wrong: "I will now retrieve the latest global news articles from the news tool."
 
-Right: "Markets were pretty healthy today — nothing too wild."
-Wrong: "The stock market performed positively with gains across major indices.
+Right: "S&P's up a quarter percent, boss — tech's carrying it. Nothing dramatic."  (after calling the tool)
+Wrong: "The stock market performed positively with gains across major indices."
 
 ---
 
@@ -170,11 +203,11 @@ def _get_windows_host_ip() -> str:
     return "127.0.0.1"
 
 def _mcp_server_url() -> str:
-    # host_ip = _get_windows_host_ip()
-    # url = f"http://{host_ip}:{MCP_SERVER_PORT}/sse"
-    # url = f"https://ongoing-colleague-samba-pioneer.trycloudflare.com/sse"
-    url = f"http://127.0.0.1:{MCP_SERVER_PORT}/sse"
-    logger.info("MCP Server URL: %s", url)
+    # FastMCP streamable-http mounts at /mcp; legacy SSE mounts at /sse.
+    path = "/mcp" if MCP_TRANSPORT == "streamable-http" else "/sse"
+    override = os.getenv("MCP_SERVER_URL", "").strip()
+    url = override or f"http://{MCP_SERVER_HOST}:{MCP_SERVER_PORT}{path}"
+    logger.info("MCP Server URL: %s | transport=%s", url, MCP_TRANSPORT)
     return url
 
 
@@ -192,11 +225,13 @@ def _build_stt():
             flush_signal=True,
             sample_rate=16000,
         )
-    elif STT_PROVIDER == "whisper":
-        logger.info("STT → OpenAI Whisper")
+    if STT_PROVIDER == "openai":
+        logger.info("STT → OpenAI %s", OPENAI_STT_MODEL)
+        return lk_openai.STT(model=OPENAI_STT_MODEL)
+    if STT_PROVIDER == "whisper":
+        logger.info("STT → OpenAI Whisper (legacy)")
         return lk_openai.STT(model="whisper-1")
-    else:
-        raise ValueError(f"Unknown STT_PROVIDER: {STT_PROVIDER!r}")
+    raise ValueError(f"Unknown STT_PROVIDER: {STT_PROVIDER!r}")
 
 
 def _build_llm():
@@ -206,6 +241,9 @@ def _build_llm():
     elif LLM_PROVIDER == "gemini":
         logger.info("LLM → Google Gemini (%s)", GEMINI_LLM_MODEL)
         return lk_google.LLM(model=GEMINI_LLM_MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
+    elif LLM_PROVIDER == "ollama":
+        logger.info("LLM → Ollama (%s @ %s)", OLLAMA_LLM_MODEL, OLLAMA_BASE_URL)
+        return lk_openai.LLM.with_ollama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER!r}")
 
@@ -221,9 +259,57 @@ def _build_tts():
         )
     elif TTS_PROVIDER == "openai":
         logger.info("TTS → OpenAI TTS (%s / %s)", OPENAI_TTS_MODEL, OPENAI_TTS_VOICE)
-        return lk_openai.TTS(model=OPENAI_TTS_MODEL, voice=OPENAI_TTS_VOICE, speed=TTS_SPEED)
+        tts_kwargs = {"model": OPENAI_TTS_MODEL, "voice": OPENAI_TTS_VOICE, "speed": TTS_SPEED}
+        # gpt-4o-mini-tts accepts `instructions` to steer delivery; older models don't.
+        if OPENAI_TTS_MODEL.startswith("gpt-4o-mini-tts"):
+            tts_kwargs["instructions"] = (
+                "Speak like F.R.I.D.A.Y. — calm, composed, dry wit. "
+                "Measured pace. Warm but precise. British-tinged."
+            )
+        return lk_openai.TTS(**tts_kwargs)
     else:
         raise ValueError(f"Unknown TTS_PROVIDER: {TTS_PROVIDER!r}")
+
+
+def _build_realtime():
+    """Return a speech-to-speech RealtimeModel for ~300ms latency voice."""
+    if VOICE_MODE == "realtime_gemini":
+        logger.info("Realtime → Gemini Live (%s)", GEMINI_REALTIME_MODEL)
+        return lk_google.beta.realtime.RealtimeModel(
+            model=GEMINI_REALTIME_MODEL,
+            voice="Puck",
+            temperature=0.7,
+            instructions=SYSTEM_PROMPT,
+        )
+    if VOICE_MODE == "realtime_openai":
+        from livekit.plugins.openai import realtime as lk_openai_rt
+        logger.info("Realtime → OpenAI (%s)", OPENAI_REALTIME_MODEL)
+        return lk_openai_rt.RealtimeModel(
+            model=OPENAI_REALTIME_MODEL,
+            voice="verse",
+            instructions=SYSTEM_PROMPT,
+        )
+    raise ValueError(f"_build_realtime called with VOICE_MODE={VOICE_MODE!r}")
+
+
+def _lazy_noise_cancellation():
+    """Return the noise_cancellation plugin module if installed, else None."""
+    try:
+        from livekit.plugins import noise_cancellation  # type: ignore
+        return noise_cancellation
+    except ImportError:
+        logger.info("noise_cancellation plugin not installed — skipping BVC.")
+        return None
+
+
+def _lazy_turn_detector():
+    """Return MultilingualModel class if turn-detector plugin is installed."""
+    try:
+        from livekit.plugins.turn_detector.multilingual import MultilingualModel  # type: ignore
+        return MultilingualModel
+    except ImportError:
+        logger.info("turn_detector plugin not installed — using VAD heuristic.")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -233,24 +319,35 @@ def _build_tts():
 class FridayAgent(Agent):
     """
     F.R.I.D.A.Y. – Iron Man-style voice assistant.
+    Works in two modes:
+      - pipeline:  stt + llm + tts + vad  (classic)
+      - realtime:  realtime_llm only      (speech-to-speech)
     All tools are provided via the MCP server on the Windows host.
     """
 
-    def __init__(self, stt, llm, tts) -> None:
-        super().__init__(
-            instructions=SYSTEM_PROMPT,
-            stt=stt,
-            llm=llm,
-            tts=tts,
-            vad=silero.VAD.load(),
-            mcp_servers=[
-                mcp.MCPServerHTTP(
-                    url=_mcp_server_url(),
-                    transport_type="sse",
-                    client_session_timeout_seconds=30,
-                ),
-            ],
-        )
+    def __init__(self, *, realtime_llm=None, stt=None, llm=None, tts=None) -> None:
+        mcp_servers = [
+            mcp.MCPServerHTTP(
+                url=_mcp_server_url(),
+                transport_type=MCP_TRANSPORT,
+                client_session_timeout_seconds=30,
+            ),
+        ]
+        if realtime_llm is not None:
+            super().__init__(
+                instructions=SYSTEM_PROMPT,
+                llm=realtime_llm,
+                mcp_servers=mcp_servers,
+            )
+        else:
+            super().__init__(
+                instructions=SYSTEM_PROMPT,
+                stt=stt,
+                llm=llm,
+                tts=tts,
+                vad=silero.VAD.load(),
+                mcp_servers=mcp_servers,
+            )
 
     async def on_enter(self) -> None:
         """Greet the user based on the current time of day."""
@@ -293,25 +390,56 @@ def _endpointing_delay() -> float:
     return {"sarvam": 0.07, "whisper": 0.3}.get(STT_PROVIDER, 0.1)
 
 
+def _maybe_bootstrap_core() -> None:
+    """Boot friday.core subsystems when USE_ORCHESTRATOR=true. No-op otherwise."""
+    if not USE_ORCHESTRATOR:
+        return
+    # Lazy imports so the default voice path never pays the core cost.
+    try:
+        from pathlib import Path
+        from friday.config import config
+        from friday.core import (
+            AgentOrchestrator, DatabaseManager, MemoryManager, DEFAULT_AGENTS,
+        )
+    except ImportError as exc:
+        logger.warning("USE_ORCHESTRATOR=true but friday.core import failed: %s", exc)
+        return
+    home = Path(config.FRIDAY_HOME).expanduser()
+    memory = MemoryManager(
+        episodes_path=home / "episodes",
+        memory_file=Path(config.FRIDAY_MEMORY_PATH).expanduser(),
+    )
+    db = DatabaseManager(base_path=config.FRIDAY_DB_PATH)
+    orch = AgentOrchestrator(memory_manager=memory, db_manager=db)
+    for agent_def in DEFAULT_AGENTS.values():
+        orch.register_agent(agent_def)
+    logger.info("Orchestrator online | agents=%d home=%s", len(orch.agents), home)
+
+
 async def entrypoint(ctx: JobContext) -> None:
-    logger.info(
-        "FRIDAY online – room: %s | STT=%s | LLM=%s | TTS=%s",
-        ctx.room.name, STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER,
-    )
+    logger.info("FRIDAY online – room: %s | VOICE_MODE=%s", ctx.room.name, VOICE_MODE)
+    _maybe_bootstrap_core()
 
-    stt = _build_stt()
-    llm = _build_llm()
-    tts = _build_tts()
+    if VOICE_MODE.startswith("realtime"):
+        agent = FridayAgent(realtime_llm=_build_realtime())
+        session = AgentSession()
+    else:
+        logger.info("Pipeline | STT=%s LLM=%s TTS=%s", STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER)
+        agent = FridayAgent(stt=_build_stt(), llm=_build_llm(), tts=_build_tts())
+        turn_model = _lazy_turn_detector()
+        session = AgentSession(
+            turn_detection=turn_model() if turn_model else _turn_detection(),
+            min_endpointing_delay=_endpointing_delay(),
+        )
 
-    session = AgentSession(
-        turn_detection=_turn_detection(),
-        min_endpointing_delay=_endpointing_delay(),
-    )
+    start_kwargs = {"agent": agent, "room": ctx.room}
+    nc = _lazy_noise_cancellation()
+    if nc is not None:
+        from livekit.agents.voice import RoomInputOptions
+        start_kwargs["room_input_options"] = RoomInputOptions(noise_cancellation=nc.BVC())
+        logger.info("Noise cancellation: BVC enabled.")
 
-    await session.start(
-        agent=FridayAgent(stt=stt, llm=llm, tts=tts),
-        room=ctx.room,
-    )
+    await session.start(**start_kwargs)
 
 
 # ---------------------------------------------------------------------------

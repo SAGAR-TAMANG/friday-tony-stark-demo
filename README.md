@@ -2,12 +2,12 @@
 
 > *"Fully Responsive Intelligent Digital Assistant for You"*
 
-A Tony Stark-inspired AI assistant split into two cooperating pieces:
+A Tony-Stark-inspired personal AI, split into two cooperating processes:
 
 | Component | What it is |
 |-----------|-----------|
-| **MCP Server** (`uv run friday`) | A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes tools (news, web search, system info, …) over SSE. Think of it as the Stark Industries backend — it does the actual work. |
-| **Voice Agent** (`uv run friday_voice`) | A [LiveKit Agents](https://github.com/livekit/agents) voice pipeline that listens to your microphone, reasons with an LLM (Gemini 2.5 Flash by default), and speaks back with OpenAI TTS — all while pulling tools from the MCP server in real time. |
+| **MCP Server** (`uv run friday`) | A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes ten tool groups (news, finance, weather, search, notify, calendar, mail, memory, system, utils) over the current **Streamable HTTP** transport. |
+| **Voice Agent** (`uv run friday_voice`) | A [LiveKit Agents 1.6+](https://github.com/livekit/agents) voice loop. Runs in **pipeline** (STT → LLM → TTS), **realtime_gemini**, or **realtime_openai** modes — all three see the same MCP tool set. |
 
 Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 
@@ -18,19 +18,24 @@ Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 ## How it works
 
 ```
-Microphone ──► STT (Sarvam Saaras v3)
-                    │
-                    ▼
-             LLM (Gemini 2.5 Flash)  ◄──────► MCP Server (FastMCP / SSE)
-                    │                              ├─ get_world_news
-                    ▼                              ├─ open_world_monitor
-             TTS (OpenAI nova)                     ├─ search_web
-                    │                              └─ …more tools
-                    ▼
-             Speaker / LiveKit room
+Microphone ──► [pipeline]  STT → LLM → TTS
+           └─► [realtime]  speech-to-speech (Gemini Live / GPT Realtime)
+                                 │
+                                 ▼
+                          MCP Server (FastMCP, Streamable HTTP :8000/mcp)
+                                 ├─ search_web, fetch_url
+                                 ├─ get_world_news, get_news_by_topic
+                                 ├─ get_stock_quote, get_crypto_price
+                                 ├─ get_weather, get_forecast
+                                 ├─ notify_user, send_morning_briefing
+                                 ├─ check_mail, send_mail
+                                 ├─ get_todays_events, get_upcoming_events
+                                 ├─ remember_fact, recall, forget
+                                 └─ get_current_time, get_system_info, …
 ```
 
-The voice agent connects to the MCP server via SSE at `http://127.0.0.1:8000/sse` (auto-resolved to the Windows host IP when running inside WSL).
+The voice agent connects to the MCP server at `http://127.0.0.1:8000/mcp`
+(auto-resolved to the Windows host IP when running inside WSL).
 
 ---
 
@@ -38,19 +43,26 @@ The voice agent connects to the MCP server via SSE at `http://127.0.0.1:8000/sse
 
 ```
 friday-tony-stark-demo/
-├── server.py           # uv run friday  → starts the MCP server (SSE on :8000)
-├── agent_friday.py     # uv run friday_voice → starts the LiveKit voice agent
+├── server.py             # uv run friday  → FastMCP server (streamable-http :8000)
+├── agent_friday.py       # uv run friday_voice → LiveKit voice agent
 ├── pyproject.toml
-├── .env.example        # copy → .env and fill in your keys
+├── .env.example          # copy → .env and fill in your keys
 │
-└── friday/             # MCP server package
-    ├── config.py       # env-var loading & app-wide settings
-    ├── tools/          # MCP tools (callable by the LLM)
-    │   ├── web.py      # search_web, fetch_url, get_world_news, open_world_monitor
-    │   ├── system.py   # get_current_time, get_system_info
-    │   └── utils.py    # format_json, word_count
-    ├── prompts/        # MCP prompt templates (summarize, explain_code, …)
-    └── resources/      # MCP resources exposed to clients (friday://info)
+└── friday/               # MCP server package
+    ├── config.py         # env-var loading & app-wide settings
+    ├── tools/            # MCP tools (callable by the LLM)
+    │   ├── web.py        # search_web, fetch_url, open_world_monitor
+    │   ├── news.py       # get_world_news, get_news_by_topic, get_trending_events
+    │   ├── finance.py    # get_stock_quote, get_market_overview, get_crypto_price
+    │   ├── weather.py    # get_weather, get_forecast
+    │   ├── notify.py     # notify_user, send_morning_briefing
+    │   ├── calendar.py   # get_todays_events, get_upcoming_events
+    │   ├── mail.py       # check_mail, send_mail
+    │   ├── memory.py     # remember_fact, remember_event, recall, forget
+    │   ├── system.py     # get_current_time, get_system_info
+    │   └── utils.py      # format_json, word_count
+    ├── prompts/          # MCP prompt templates (summarize, explain_code, …)
+    └── resources/        # MCP resources (friday://info)
 ```
 
 ---
@@ -68,14 +80,14 @@ friday-tony-stark-demo/
 ```bash
 git clone https://github.com/SAGAR-TAMANG/friday-tony-stark-demo.git
 cd friday-tony-stark-demo
-uv sync          # creates .venv and installs all dependencies
+uv sync
 ```
 
 ### 3. Set up environment
 
 ```bash
 cp .env.example .env
-# Open .env and fill in your API keys (see the section below)
+# Open .env and fill in your API keys — most tools have keyless defaults.
 ```
 
 ### 4. Run — two terminals
@@ -84,9 +96,8 @@ cp .env.example .env
 
 ```bash
 uv run friday
+# [Friday] MCP server starting | transport=streamable-http  →  :8000/mcp
 ```
-
-Starts the FastMCP server on `http://127.0.0.1:8000/sse`. The voice agent connects here to fetch its tools.
 
 **Terminal 2 — Voice agent**
 
@@ -94,71 +105,94 @@ Starts the FastMCP server on `http://127.0.0.1:8000/sse`. The voice agent connec
 uv run friday_voice
 ```
 
-Starts the LiveKit voice agent in **dev mode** — it joins a LiveKit room and begins listening. Open the [LiveKit Agents Playground](https://agents-playground.livekit.io) and connect to your room to talk to FRIDAY.
+Joins a LiveKit room. Open the
+[LiveKit Agents Playground](https://agents-playground.livekit.io) and
+connect to hear FRIDAY greet you.
 
 ---
 
-## `uv run friday` vs `uv run friday_voice`
+## Voice modes
 
-| Command | Entry point | What it does |
-|---------|------------|--------------|
-| `uv run friday` | `server.py → main()` | Launches the **FastMCP server** over SSE transport on port 8000. This is the "brain backend" — it registers all tools, prompts, and resources that the LLM can call. |
-| `uv run friday_voice` | `agent_friday.py → dev()` | Launches the **LiveKit voice agent**. It builds the STT / LLM / TTS pipeline, connects to your LiveKit room, and wires up the MCP server as a tool source. The `dev()` wrapper auto-injects the `dev` CLI flag so you don't have to type it manually. |
+| `VOICE_MODE` | Pipeline | Latency | When to use |
+|---|---|---|---|
+| `pipeline` *(default)* | STT → LLM → TTS | ~1.5 s | Robust; most providers supported. |
+| `realtime_gemini` | Gemini Live speech-to-speech | ~300 ms | Snappy conversation. |
+| `realtime_openai` | OpenAI `gpt-realtime` | ~300 ms | Snappy; English-optimised. |
 
-> Both processes must run **simultaneously**. The voice agent calls the MCP server in real time whenever it needs a tool (e.g. fetching news).
+Switch modes with the `VOICE_MODE` env var — no code changes.
+
+If `livekit-plugins-noise-cancellation` is installed, **BVC** denoising is
+wired up automatically. If `livekit-plugins-turn-detector` is installed,
+the semantic `MultilingualModel` replaces the VAD/STT turn heuristic.
+Both are optional.
+
+---
+
+## Example prompts
+
+- "Brief me." → `get_world_news` → automatic `open_world_monitor`.
+- "What's Tesla doing?" → `get_stock_quote("TSLA")` *(real price, no hallucination)*.
+- "Bitcoin?" → `get_crypto_price("BTC")`.
+- "Weather in Mumbai?" → `get_weather("Mumbai")` via Open-Meteo.
+- "Search for latest Anthropic news." → `search_web` via Tavily → Brave → DuckDuckGo.
+- "What's on my schedule?" → `get_todays_events` (needs `GOOGLE_CALENDAR_CREDENTIALS_JSON`).
+- "Any unread mail?" → `check_mail` (needs `GMAIL_CREDENTIALS_JSON`).
+- "Remember I like black coffee." → `remember_fact`.
+- "Ping my phone." → `notify_user` via Telegram.
 
 ---
 
 ## Environment variables
 
-Copy `.env.example` → `.env` and fill in the values below.
+Full list in [`.env.example`](.env.example). Highlights:
 
-| Variable | Required | Where to get it |
-|----------|----------|----------------|
-| `LIVEKIT_URL` | ✅ | [LiveKit Cloud dashboard](https://cloud.livekit.io) → your project URL |
-| `LIVEKIT_API_KEY` | ✅ | LiveKit Cloud → API Keys |
-| `LIVEKIT_API_SECRET` | ✅ | LiveKit Cloud → API Keys |
-| `GROQ_API_KEY` | optional | [console.groq.com](https://console.groq.com) — only needed if you switch `LLM_PROVIDER` to `"groq"` |
-| `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
-| `OPENAI_API_KEY` | ✅ (default TTS) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| `DEEPGRAM_API_KEY` | optional | [console.deepgram.com](https://console.deepgram.com) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | optional | GCP service-account JSON path — only for `STT_PROVIDER = "google"` |
-| `GOOGLE_API_KEY` | ✅ (default LLM) | [aistudio.google.com](https://aistudio.google.com/projects) |
-| `SUPABASE_URL` | optional | [supabase.com](https://supabase.com) — for the ticketing tool |
-| `SUPABASE_API_KEY` | optional | Supabase project → API settings |
+| Variable | Required | Notes |
+|---|---|---|
+| `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | ✅ | From LiveKit Cloud dashboard. |
+| `OPENAI_API_KEY` | ✅ (default TTS & realtime_openai) | platform.openai.com/api-keys |
+| `GOOGLE_API_KEY` | ✅ (default LLM & realtime_gemini) | aistudio.google.com |
+| `SARVAM_API_KEY` | ✅ (default STT) | dashboard.sarvam.ai |
+| `MCP_TRANSPORT` | — | `streamable-http` (default) or legacy `sse`. |
+| `VOICE_MODE` | — | `pipeline` \| `realtime_gemini` \| `realtime_openai`. |
+| `TAVILY_API_KEY` / `BRAVE_API_KEY` | — | Upgrade `search_web` beyond DuckDuckGo. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | Enable `notify_user`. |
+| `GMAIL_CREDENTIALS_JSON` / `GOOGLE_CALENDAR_CREDENTIALS_JSON` | — | Enable mail + calendar tools. |
+| `FINNHUB_API_KEY` / `OPENWEATHERMAP_API_KEY` / `NEWSAPI_KEY` | — | Premium fallbacks; keyless defaults work fine. |
 
 ---
 
 ## Switching providers
 
-Open `agent_friday.py` and change the provider constants at the top:
+Open `agent_friday.py` (or set env vars) and change:
 
 ```python
-STT_PROVIDER = "sarvam"   # "sarvam" | "whisper"
-LLM_PROVIDER = "gemini"   # "gemini" | "openai"
-TTS_PROVIDER = "openai"   # "openai" | "sarvam"
+STT_PROVIDER = "sarvam"    # sarvam | openai | whisper
+LLM_PROVIDER = "gemini"    # gemini | openai
+TTS_PROVIDER = "openai"    # openai | sarvam
+VOICE_MODE   = "pipeline"  # pipeline | realtime_gemini | realtime_openai
 ```
 
 ---
 
 ## Adding a new tool
 
-1. Create or open a file in `friday/tools/`
-2. Define a `register(mcp)` function and decorate tools with `@mcp.tool()`
-3. Import and call `register(mcp)` inside `friday/tools/__init__.py`
+1. Create or open a file in `friday/tools/`.
+2. Define a `register(mcp)` function and decorate tools with `@mcp.tool()`.
+3. Import the module and call `register(mcp)` in `friday/tools/__init__.py`.
 
-The MCP server will pick it up on next start.
+The MCP server picks it up on next start.
 
 ---
 
 ## Tech stack
 
-- **[FastMCP](https://github.com/jlowin/fastmcp)** — MCP server framework
-- **[LiveKit Agents](https://github.com/livekit/agents)** — real-time voice pipeline
-- **Sarvam Saaras v3** — STT (Indian-English optimised)
-- **Google Gemini 2.5 Flash** — LLM
-- **OpenAI TTS** (`nova` voice) — TTS
-- **[uv](https://github.com/astral-sh/uv)** — fast Python package manager
+- **[FastMCP](https://github.com/jlowin/fastmcp)** (Streamable HTTP) — MCP server.
+- **[LiveKit Agents 1.6+](https://github.com/livekit/agents)** — voice pipeline + realtime.
+- **Sarvam Saaras v3** / **OpenAI `gpt-4o-transcribe`** — STT.
+- **Google Gemini 2.5 Pro** / **OpenAI `gpt-4.1`** — LLM.
+- **OpenAI `gpt-4o-mini-tts`** (steerable) / **Sarvam Bulbul v3** — TTS.
+- **Realtime**: **Gemini Live** & **OpenAI `gpt-realtime`**.
+- **Data backends**: GDELT 2.0, yfinance, CoinGecko, Open-Meteo, Telegram, Gmail, Google Calendar, Tavily/Brave/DuckDuckGo.
 
 ---
 
