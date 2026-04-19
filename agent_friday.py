@@ -253,13 +253,32 @@ class FridayAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        """Greet the user specifically for the late-night lab session."""
-        await self.session.generate_reply(
-            instructions=(
-                "Greet the user exactly with: 'Greetings boss, you're awake late at night today. What you up to?' "
+        """Greet the user based on the current time of day."""
+        from datetime import datetime, timezone
+        hour = datetime.now(timezone.utc).hour  # UTC hour; adjust if local TZ differs
+
+        if hour >= 22 or hour < 4:
+            greeting_instruction = (
+                "Greet the user with: 'Greetings boss, you're up late at night today. What are you up to?' "
                 "Maintain a helpful but dry tone."
             )
-        )
+        elif 4 <= hour < 12:
+            greeting_instruction = (
+                "Greet the user with: 'Good morning, boss. Early start today — what are we working on?' "
+                "Maintain a helpful but dry tone."
+            )
+        elif 12 <= hour < 17:
+            greeting_instruction = (
+                "Greet the user with: 'Good afternoon, boss. What do you need?' "
+                "Maintain a helpful but dry tone."
+            )
+        else:  # 17–21
+            greeting_instruction = (
+                "Greet the user with: 'Good evening, boss. What are you up to tonight?' "
+                "Maintain a helpful but dry tone."
+            )
+
+        await self.session.generate_reply(instructions=greeting_instruction)
 
 
 # ---------------------------------------------------------------------------
