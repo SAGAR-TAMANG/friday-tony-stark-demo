@@ -28,6 +28,13 @@ End-to-end upgrade of the FRIDAY voice agent: the model now calls MCP tools, spe
 - Default model bumped to `qwen2.5:7b-instruct` — `llama3.2:1b` emits tool calls as free text (broken on Ollama's OpenAI-compat layer).
 - Documented `get_current_time` in `SYSTEM_PROMPT` + added catch-all behavioral rule: "For ANY question requiring live data, call the tool. Never answer from training memory."
 
+### Persistent session memory (`0bec5e0`, `ee8dcd6`)
+- Reminders (`add_reminder` / `list_reminders` / `clear_reminders`) now survive MCP server restarts and reboots.
+- Backed by `~/.friday/reminders.json` — lazy-loaded on first tool call, flushed after every mutation.
+- Best-effort persistence: disk errors are logged but never raised; reminders still work in memory if the disk write fails.
+- Corrupt JSON falls back to empty instead of crashing.
+- 4 smoke tests exercise the roundtrip, fresh-install, corrupt-file, and clear paths.
+
 ### Streaming TTS (`cb0db0d`)
 - New: sentence-by-sentence speech dispatch while generation continues.
 - Producer/consumer pattern — `on_text` callback pushes tokens into an `asyncio.Queue`; background `_speak_streaming` task drains it, buffers until sentence boundary (`.!?` + whitespace), sends each sentence to the SAPI daemon.
