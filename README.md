@@ -7,7 +7,7 @@ A Tony Stark-inspired AI assistant split into two cooperating pieces:
 | Component | What it is |
 |-----------|-----------|
 | **MCP Server** (`uv run friday`) | A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes tools (news, web search, system info, …) over SSE. Think of it as the Stark Industries backend — it does the actual work. |
-| **Voice Agent** (`uv run friday_voice`) | A [LiveKit Agents](https://github.com/livekit/agents) voice pipeline that listens to your microphone, reasons with an LLM (Gemini 2.5 Flash by default), and speaks back with OpenAI TTS — all while pulling tools from the MCP server in real time. |
+| **Voice Agent** (`uv run friday_voice`) | A [LiveKit Agents](https://github.com/livekit/agents) voice pipeline that listens to your microphone, reasons with an LLM (OpenAI `gpt-4o` by default), and speaks back with OpenAI TTS — all while pulling tools from the MCP server in real time. |
 
 Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 
@@ -21,7 +21,7 @@ Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 Microphone ──► STT (Sarvam Saaras v3)
                     │
                     ▼
-             LLM (Gemini 2.5 Flash)  ◄──────► MCP Server (FastMCP / SSE)
+             LLM (OpenAI gpt-4o)     ◄──────► MCP Server (FastMCP / SSE)
                     │                              ├─ get_world_news
                     ▼                              ├─ open_world_monitor
              TTS (OpenAI nova)                     ├─ search_web
@@ -47,6 +47,9 @@ friday-tony-stark-demo/
     ├── config.py       # env-var loading & app-wide settings
     ├── tools/          # MCP tools (callable by the LLM)
     │   ├── web.py      # search_web, fetch_url, get_world_news, open_world_monitor
+    │   ├── desktop.py  # browser opening, desktop view, safe file IO, memory notes
+    │   ├── mac_worker.py # app launching, screen vision, guarded click/type/keys
+    │   ├── messaging.py  # confirmed Messages/WhatsApp/Slack/email actions
     │   ├── system.py   # get_current_time, get_system_info
     │   └── utils.py    # format_json, word_count
     ├── prompts/        # MCP prompt templates (summarize, explain_code, …)
@@ -120,12 +123,29 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `LIVEKIT_API_SECRET` | ✅ | LiveKit Cloud → API Keys |
 | `GROQ_API_KEY` | optional | [console.groq.com](https://console.groq.com) — only needed if you switch `LLM_PROVIDER` to `"groq"` |
 | `SARVAM_API_KEY` | ✅ (default STT) | [dashboard.sarvam.ai](https://dashboard.sarvam.ai) |
-| `OPENAI_API_KEY` | ✅ (default TTS) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `OPENAI_API_KEY` | ✅ (default LLM + TTS) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
 | `DEEPGRAM_API_KEY` | optional | [console.deepgram.com](https://console.deepgram.com) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | optional | GCP service-account JSON path — only for `STT_PROVIDER = "google"` |
-| `GOOGLE_API_KEY` | ✅ (default LLM) | [aistudio.google.com](https://aistudio.google.com/projects) |
+| `GOOGLE_API_KEY` | optional | [aistudio.google.com](https://aistudio.google.com/projects) — only needed if you switch `LLM_PROVIDER` to `"gemini"` |
+| `OBSIDIAN_VAULT_PATH` | optional | Path to the Obsidian/SecBrain vault used by memory tools |
+| `WORKSPACE_ROOTS` | optional | Colon- or comma-separated folders the desktop file tools may read/write |
+| `OPENAI_VISION_MODEL` | optional | Defaults to `gpt-4o`; used by screen description tools |
+| `FRIDAY_REQUIRE_CONFIRMATION` | optional | Defaults to `true`; risky desktop actions require confirmation |
+| `FRIDAY_SCREENSHOT_DIR` | optional | Defaults to `/tmp/friday-screens`; stores temporary screenshots |
 | `SUPABASE_URL` | optional | [supabase.com](https://supabase.com) — for the ticketing tool |
 | `SUPABASE_API_KEY` | optional | Supabase project → API settings |
+
+---
+
+## Mac automation permissions
+
+For the human-worker tools, macOS may prompt for:
+
+- **Screen Recording** — needed for `describe_screen`.
+- **Accessibility** — needed for confirmed click/type/key actions.
+- **Automation** — needed for Messages/System Events/WhatsApp control.
+
+Risky actions are prepared first and require confirmation before execution.
 
 ---
 
@@ -135,7 +155,7 @@ Open `agent_friday.py` and change the provider constants at the top:
 
 ```python
 STT_PROVIDER = "sarvam"   # "sarvam" | "whisper"
-LLM_PROVIDER = "gemini"   # "gemini" | "openai"
+LLM_PROVIDER = "openai"   # "openai" | "gemini"
 TTS_PROVIDER = "openai"   # "openai" | "sarvam"
 ```
 
@@ -156,7 +176,7 @@ The MCP server will pick it up on next start.
 - **[FastMCP](https://github.com/jlowin/fastmcp)** — MCP server framework
 - **[LiveKit Agents](https://github.com/livekit/agents)** — real-time voice pipeline
 - **Sarvam Saaras v3** — STT (Indian-English optimised)
-- **Google Gemini 2.5 Flash** — LLM
+- **OpenAI** (`gpt-4o`) — LLM
 - **OpenAI TTS** (`nova` voice) — TTS
 - **[uv](https://github.com/astral-sh/uv)** — fast Python package manager
 
