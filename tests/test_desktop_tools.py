@@ -34,14 +34,8 @@ class DesktopToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             desktop.normalize_browser_url("javascript:alert(1)")
 
-    def test_desktop_view_writes_html_under_workspace(self):
-        with tempfile.TemporaryDirectory() as root:
-            with patch.dict(os.environ, {"WORKSPACE_ROOTS": root}, clear=False):
-                result = desktop.create_desktop_view()
-                path = Path(result["path"])
-                self.assertTrue(path.is_file())
-                self.assertEqual(path.parent, Path(root).resolve())
-                self.assertIn("F.R.I.D.A.Y.", path.read_text())
+    def test_legacy_html_desktop_view_tool_is_removed(self):
+        self.assertFalse(hasattr(desktop, "create_desktop_view"))
 
     def test_remember_note_writes_to_obsidian_vault_and_blocks_secrets(self):
         with tempfile.TemporaryDirectory() as vault:

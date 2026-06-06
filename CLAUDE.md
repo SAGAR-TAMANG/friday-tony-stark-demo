@@ -93,3 +93,32 @@ Inherit the global Vault First, Vault Ask rules from `~/.claude/CLAUDE.md`. For 
 4. Verify wiki claims against the actual code in this repo. Source notes are immutable inputs; the compiled wiki is the working knowledge.
 
 **Vault writes.** Never auto-save. Before any vault write, ask: "Do you want me to save this thread/work into Obsidian?" Only write if explicitly approved or asked this turn. When approved, update: source/output → affected entities/concepts → backlinks → `index.md` → `log.md` → `status/recent-changes.md`. Maintain bidirectional `[[wikilinks]]`, aliases, and `See Also`. Never store API keys, LiveKit secrets, `.env` contents, or raw user data in the vault.
+
+
+
+## Open threads worth picking up
+
+In rough priority order:
+
+1. **Voice input in the desktop app.** Currently text-only. Add a mic
+   button that drives the same `Brain.send()` path via Whisper (already
+   in the OpenAI client) or Sarvam STT (already a dep).
+2. **Amplitude-reactive speaking ripple.** The orb has a `speaking`
+   state with a high-frequency rim wobble, but it's faked. If we add
+   real TTS playback, drive the wobble from the audio amplitude.
+3. **Persist desktop chat into memory at session end.** The voice agent
+   has no session memory yet either — both could call `save_memory`
+   with a session summary on close.
+4. **A real integration if the user authorizes it.** Jira and Slack are
+   the highest-leverage ones from the spec, but only build with their
+   credentials in hand.
+
+---
+
+## A note on this handoff
+
+This file was written by a previous Claude session running on Claude
+Code on the web. That session built everything described above and
+handed the code over via zip. The web session and your local CLI
+session don't share conversation history — only the working tree and
+this file. Treat this CLAUDE.md as the entire briefing.

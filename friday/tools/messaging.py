@@ -69,6 +69,16 @@ def _osascript(script: str) -> subprocess.CompletedProcess:
     return subprocess.run(["osascript", "-e", script], check=True)
 
 
+def _osascript_output(script: str) -> str:
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def _prune_expired() -> None:
     now = time.time()
     expired = [
@@ -106,7 +116,17 @@ def prepare_outbound_message(channel: str, recipient: str, message: str) -> dict
     }
 
 
-def confirm_pending_action(action_id: str) -> dict:
+def _latest_pending_action_id() -> str:
+    _prune_expired()
+    if not PENDING_ACTIONS:
+        raise KeyError("No pending message action found.")
+    return max(PENDING_ACTIONS.values(), key=lambda action: action.created_at).action_id
+
+
+def confirm_pending_action(action_id: str | None = None) -> dict:
+    if not action_id:
+        action_id = _latest_pending_action_id()
+
     action = PENDING_ACTIONS.get(action_id)
     if action is None:
         raise KeyError(f"No pending action found: {action_id}")
@@ -141,16 +161,83 @@ def _execute_message_action(payload: dict) -> str:
     raise ValueError(f"Unsupported message channel: {channel}")
 
 
+def _looks_like_direct_handle(recipient: str) -> bool:
+    return "@" in recipient or bool(_digits_and_plus(recipient))
+
+
+def _lookup_contact_handle(recipient: str) -> str | None:
+    script = f'''
+tell application "Contacts"
+    set targetName to "{_apple_string(recipient)}"
+    set matches to every person whose name contains targetName
+    if (count of matches) is 0 then return ""
+
+    repeat with targetPerson in matches
+        repeat with targetPhone in phones of targetPerson
+            set phoneLabel to (label of targetPhone) as text
+            set phoneValue to (value of targetPhone) as text
+            if phoneLabel contains "mobile" or phoneLabel contains "iPhone" then return phoneValue
+        end repeat
+    end repeat
+
+    repeat with targetPerson in matches
+        if (count of phones of targetPerson) > 0 then return (value of item 1 of phones of targetPerson) as text
+    end repeat
+
+    repeat with targetPerson in matches
+        if (count of emails of targetPerson) > 0 then return (value of item 1 of emails of targetPerson) as text
+    end repeat
+
+    return ""
+end tell
+'''
+    try:
+        handle = _osascript_output(script)
+    except Exception:
+        return None
+    return handle.strip() or None
+
+
 def _send_apple_message(recipient: str, message: str) -> str:
+    handle = recipient
+    if not _looks_like_direct_handle(recipient):
+        handle = _lookup_contact_handle(recipient) or recipient
+    return _send_messages_handle(handle, message)
+
+
+def _send_messages_handle(recipient: str, message: str) -> str:
+    errors = []
+    for service_type, label in (("iMessage", "iMessage"), ("SMS", "SMS")):
+        script = _messages_send_script(service_type, recipient, message)
+        try:
+            _osascript(script)
+            return f"Sent through Apple Messages ({label})."
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    return _open_messages_draft(recipient, message, errors)
+
+
+def _messages_send_script(service_type: str, recipient: str, message: str) -> str:
     script = f'''
 tell application "Messages"
     set targetBuddy to "{_apple_string(recipient)}"
-    set targetService to 1st service whose service type = iMessage
+    set targetService to 1st service whose service type = {service_type}
     send "{_apple_string(message)}" to buddy targetBuddy of targetService
 end tell
 '''
-    _osascript(script)
-    return "Sent through Apple Messages."
+    return script
+
+
+def _open_messages_draft(recipient: str, message: str, errors: list[str]) -> str:
+    url = f"sms:{quote(recipient, safe='+@')}&body={quote(message)}"
+    webbrowser.open(url)
+    error_text = "; ".join(errors)[:240]
+    return (
+        "Opened Messages draft because direct send failed. "
+        "Review and press Send in Messages. "
+        f"Direct-send error: {error_text}"
+    )
 
 
 def _digits_and_plus(value: str) -> str:
@@ -189,6 +276,6 @@ def register(mcp):
         return prepare_outbound_message(channel=channel, recipient=recipient, message=message)
 
     @mcp.tool()
-    def confirm_message_action(action_id: str) -> dict:
-        """Execute a previously prepared message after explicit confirmation."""
+    def confirm_message_action(action_id: str | None = None) -> dict:
+        """Execute a previously prepared message after explicit confirmation. If action_id is omitted, executes the newest pending message."""
         return confirm_pending_action(action_id=action_id)

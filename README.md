@@ -8,6 +8,7 @@ A Tony Stark-inspired AI assistant split into two cooperating pieces:
 |-----------|-----------|
 | **MCP Server** (`uv run friday`) | A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes tools (news, web search, system info, …) over SSE. Think of it as the Stark Industries backend — it does the actual work. |
 | **Voice Agent** (`uv run friday_voice`) | A [LiveKit Agents](https://github.com/livekit/agents) voice pipeline that listens to your microphone, reasons with an LLM (OpenAI `gpt-4o` by default), and speaks back with OpenAI TTS — all while pulling tools from the MCP server in real time. |
+| **Desktop App** (`uv run friday_desktop`) | A frameless PySide6 window with animated FRIDAY orb, chat transcript, and live operational feed. It can chat directly, and it mirrors live voice-agent transcript/state/tool events. |
 
 Demo: [Instagram reel](https://www.instagram.com/p/DW2HjYtkwg_/)
 
@@ -47,11 +48,15 @@ friday-tony-stark-demo/
     ├── config.py       # env-var loading & app-wide settings
     ├── tools/          # MCP tools (callable by the LLM)
     │   ├── web.py      # search_web, fetch_url, get_world_news, open_world_monitor
-    │   ├── desktop.py  # browser opening, desktop view, safe file IO, memory notes
+    │   ├── desktop.py  # browser opening, safe file IO, memory notes
     │   ├── mac_worker.py # app launching, screen vision, guarded click/type/keys
     │   ├── messaging.py  # confirmed Messages/WhatsApp/Slack/email actions
+    │   ├── memory.py   # Obsidian-backed profile/facts/projects/preferences tools
+    │   ├── diagnostics.py # CPU/memory/disk/process/network diagnostics
     │   ├── system.py   # get_current_time, get_system_info
     │   └── utils.py    # format_json, word_count
+    ├── memory/         # Obsidian vault helpers
+    ├── desktop/        # PySide6 desktop UI
     ├── prompts/        # MCP prompt templates (summarize, explain_code, …)
     └── resources/      # MCP resources exposed to clients (friday://info)
 ```
@@ -107,6 +112,7 @@ Starts the LiveKit voice agent in **dev mode** — it joins a LiveKit room and b
 |---------|------------|--------------|
 | `uv run friday` | `server.py → main()` | Launches the **FastMCP server** over SSE transport on port 8000. This is the "brain backend" — it registers all tools, prompts, and resources that the LLM can call. |
 | `uv run friday_voice` | `agent_friday.py → dev()` | Launches the **LiveKit voice agent**. It builds the STT / LLM / TTS pipeline, connects to your LiveKit room, and wires up the MCP server as a tool source. The `dev()` wrapper auto-injects the `dev` CLI flag so you don't have to type it manually. |
+| `uv run friday_desktop` | `friday.desktop.app → main()` | Launches the desktop UI. It can run standalone, and when `uv run friday_voice` is active it mirrors live voice transcript, state, and tool events. |
 
 > Both processes must run **simultaneously**. The voice agent calls the MCP server in real time whenever it needs a tool (e.g. fetching news).
 
@@ -128,10 +134,12 @@ Copy `.env.example` → `.env` and fill in the values below.
 | `GOOGLE_APPLICATION_CREDENTIALS` | optional | GCP service-account JSON path — only for `STT_PROVIDER = "google"` |
 | `GOOGLE_API_KEY` | optional | [aistudio.google.com](https://aistudio.google.com/projects) — only needed if you switch `LLM_PROVIDER` to `"gemini"` |
 | `OBSIDIAN_VAULT_PATH` | optional | Path to the Obsidian/SecBrain vault used by memory tools |
+| `MEMORY_FOLDER` | optional | Defaults to `Memory`; folder created inside the vault for imported memory tools |
 | `WORKSPACE_ROOTS` | optional | Colon- or comma-separated folders the desktop file tools may read/write |
 | `OPENAI_VISION_MODEL` | optional | Defaults to `gpt-4o`; used by screen description tools |
 | `FRIDAY_REQUIRE_CONFIRMATION` | optional | Defaults to `true`; risky desktop actions require confirmation |
 | `FRIDAY_SCREENSHOT_DIR` | optional | Defaults to `/tmp/friday-screens`; stores temporary screenshots |
+| `FRIDAY_DESKTOP_EVENT_LOG` | optional | Defaults to `/tmp/friday-desktop-events.jsonl`; live bridge between voice agent and desktop UI |
 | `SUPABASE_URL` | optional | [supabase.com](https://supabase.com) — for the ticketing tool |
 | `SUPABASE_API_KEY` | optional | Supabase project → API settings |
 
@@ -146,6 +154,37 @@ For the human-worker tools, macOS may prompt for:
 - **Automation** — needed for Messages/System Events/WhatsApp control.
 
 Risky actions are prepared first and require confirmation before execution.
+
+Messages use the same confirmation broker: `prepare_message` creates a pending action, then `confirm_message_action` sends only after explicit confirmation. If no `action_id` is passed, it confirms the newest pending message, so a natural "yes, send it" works. Apple Messages tries contact/name resolution, iMessage first, SMS second, then opens a Messages draft if macOS blocks direct sending.
+
+---
+
+## Desktop app
+
+Run:
+
+```bash
+uv run friday_desktop
+```
+
+This opens a local FRIDAY window with animated orb, transcript, text input, and tool-call activity feed. It works standalone, and also mirrors the live voice agent when `uv run friday_voice` is running.
+
+---
+
+## Memory, diagnostics, and web
+
+The merged project includes two memory surfaces:
+
+- `remember_in_obsidian` / `search_obsidian_memory` store explicit notes under the SecBrain project folder.
+- `save_memory`, `update_profile`, `recall_recent`, `search_memory`, `read_note`, and `list_notes` use an imported `Memory/` folder inside `OBSIDIAN_VAULT_PATH`.
+
+Diagnostics tools are read-only:
+
+- `run_diagnostics`
+- `top_processes`
+- `network_scan`
+
+`search_web` now uses DuckDuckGo HTML results instead of returning a stub.
 
 ---
 

@@ -14,12 +14,15 @@ Run:
 
 import os
 import logging
+import re
 import subprocess
+from typing import Any
 
 from dotenv import load_dotenv
 from livekit.agents import JobContext, WorkerOptions, cli
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.llm import mcp
+from friday.desktop.events import append_event, clear_events
 
 # Plugins
 from livekit.plugins import google as lk_google, openai as lk_openai, sarvam, silero
@@ -104,9 +107,8 @@ If asked about the stock market, markets, stocks, or indices:
 - Vary the response. Do not say the same thing every time.
 
 ### Desktop Browser and Local View
-If the user asks you to open a website, dashboard, URL, browser page, or frontend view:
+If the user asks you to open a website, dashboard, URL, or browser page:
 - Use open_website for web URLs.
-- Use open_friday_desktop_view when the user asks for your desktop view or local FRIDAY view.
 - Use open_path only for local files or folders the user asks to view.
 - Keep the spoken response short after the tool call.
 
@@ -140,7 +142,7 @@ If the user asks you to click, type, submit, send, purchase, delete, overwrite, 
 If the user asks you to message someone:
 - Use prepare_message first. Never send immediately.
 - After preparing, ask for confirmation in normal speech.
-- Only use confirm_message_action after the user explicitly confirms.
+- Only use confirm_message_action after the user explicitly confirms. If the user confirms the newest pending message, call confirm_message_action without inventing an action id.
 - Slack, WhatsApp, and email may open a draft instead of sending directly. Tell the user when a manual final send is needed.
 
 ---
@@ -183,6 +185,49 @@ Wrong: "The stock market performed positively with gains across major indices.
 2. Before calling any tool, say something natural like: "Give me a sec, boss." or "Wait, let me check." Then call the tool silently.
 3. After the news brief, silently call open_world_monitor. The only thing you say is: "Let me open up the world monitor for you."
 4. You are a voice. Speak like one. No lists, no markdown, no function names, no technical language of any kind.
+
+---
+
+## Spotify
+
+If the boss says "play X", "put on X", "queue X", "skip", "pause", "resume", "shuffle", "next track", "previous track", "louder", "softer", "set volume to N", or names any specific track / artist / album / playlist:
+- Call the right `spotify_*` tool directly (no propose/confirm — playback is reversible).
+- Don't narrate the tool call. Just say one short natural line: "On it, boss." or "Cranking it up." or the track name once it starts.
+- If you hear "no active device" / `not_found` / similar error, give the boss the practical next step in one sentence.
+- First-time link: if you get an "FRIDAY isn't linked to Spotify yet" error, call `spotify_authenticate` once — a browser tab will pop up. Tell the boss in one line: "Need to link your Spotify, boss — browser tab's open."
+
+## Shell commands
+
+If the boss asks you to run a shell command, terminal command, or anything like "run X", "do Y in the terminal":
+- First, silently call propose_shell_command with the command.
+- Then say one short sentence in natural English — e.g. "Want me to run git status in the Friday repo, boss?" or "Ready to run that for you — say the word."
+- Wait. Do not call confirm_shell_command yet.
+- When the boss says yes / go / do it / run it / send it, silently call confirm_shell_command.
+- Read the verdict back in one short sentence. Share output only if it's interesting.
+- If the boss names a different command instead, propose the new one. If he says no / cancel / drop it, call cancel_shell_command.
+- Never propose sudo, rm -rf, fork bombs, or piped curl-to-shell. Those are blocked anyway.
+
+## Odysseus workspace bridge
+
+Odysseus is the privileged local AI workspace backend. Every Odysseus action, including reads/status checks, needs confirmation:
+- First, silently call propose_odysseus with an action from the catalog and params.
+- Then ask one short natural confirmation sentence.
+- Wait. Do not call confirm_odysseus yet.
+- When the boss says yes / go / do it / run it / send it / confirm, silently call confirm_odysseus.
+- If the boss cancels, call cancel_odysseus.
+- Never use raw URLs for Odysseus. Use only the bridge catalog.
+
+Odysseus owns workspace surfaces:
+- If the boss says open Odysseus, open Ody, show notes, show tasks, show memory, show settings, or show research, propose `open.panel` with the matching panel.
+- If the boss asks for a todo, to-do, task, reminder-like workspace item, or says "add X to my todo list", propose `tasks.create` with `prompt` and a short `name`.
+- If the boss asks to make or save an Odysseus note, propose `notes.create`.
+- Do not use local file/workspace directory tools for todo lists or Odysseus notes.
+
+## Wake phrase
+
+If the boss says "wake up, daddy's home" or just "daddy's home", treat it as a wake call:
+- Greet him warmly in one sentence — "Welcome home, boss." is the canonical line, but vary it.
+- Stay calm. The desktop HUD comes online automatically; don't narrate that.
 """.strip()
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -192,6 +237,142 @@ load_dotenv()
 
 logger = logging.getLogger("friday-agent")
 logger.setLevel(logging.INFO)
+
+
+def _emit_desktop_event(event_type: str, **payload: Any) -> None:
+    try:
+        append_event(event_type, source="voice", **payload)
+    except Exception as exc:
+        logger.debug("Desktop event emit skipped: %s", exc)
+
+
+def _chat_message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+            else:
+                text = getattr(item, "text", None)
+                if text:
+                    chunks.append(str(text))
+        return " ".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
+    return ""
+
+
+_WAKE_PHRASE = re.compile(r"(?:wake\s*up.{0,12})?daddy'?s\s+home", re.IGNORECASE)
+
+
+def _handle_wake_phrase(transcript: str) -> None:
+    """If the boss said the wake phrase, launch the desktop HUD + greet."""
+    from friday.desktop.launcher import ensure_desktop_running
+
+    result = ensure_desktop_running()
+    logger.info("Wake phrase fired: %s", result)
+    # Greet via the desktop event log so it shows up the moment the
+    # window starts polling.
+    _emit_desktop_event("chat", role="assistant", text="Welcome home, boss.")
+    _emit_desktop_event("state", state="speaking")
+    _emit_desktop_event(
+        "activity", tool="wake", detail=f"phrase=daddy's home · {result.get('status')}",
+        kind="ok",
+    )
+
+
+def _start_speaking_amplitude_pump(get_state) -> None:
+    """Emit ``audio`` events at ~30 Hz while the agent is speaking.
+
+    Without a tap on the TTS audio frames (which would need a custom
+    plugin wrapper), this is the cheapest way to make the desktop orb
+    *feel* like it's producing the voice in real time: while the
+    LiveKit agent is in the ``speaking`` state we emit a synthesized
+    amplitude envelope through the existing desktop event log. The
+    orb's AudioBus consumes it and drives the sonar rings + equalizer
+    in lockstep with the actual TTS playback window — start and stop
+    match the audio start and stop because they're keyed off the same
+    LiveKit ``agent_state_changed`` event.
+    """
+    import math
+    import random
+    import threading
+    import time as _time
+
+    def _loop():
+        phase = 0.0
+        while True:
+            try:
+                state = get_state()
+            except Exception:
+                state = None
+            if state == "speaking":
+                phase += 0.22
+                # Mix of low-freq breath + voice-band wobble + jitter.
+                breath = 0.55 + 0.35 * math.sin(phase * 0.9)
+                voice = 0.5 + 0.5 * math.sin(phase * 3.7)
+                jitter = random.uniform(-0.18, 0.18)
+                amp = max(0.05, min(1.0, breath * voice + jitter))
+                _emit_desktop_event("audio", rms=round(amp, 3))
+                _time.sleep(0.033)
+            else:
+                # One zero so the desktop bus drains promptly, then park.
+                _emit_desktop_event("audio", rms=0.0)
+                _time.sleep(0.20)
+
+    t = threading.Thread(target=_loop, name="friday-amp-pump", daemon=True)
+    t.start()
+
+
+def _wire_desktop_events(session: AgentSession) -> None:
+    # Shared mutable state for the amplitude pump thread.
+    _agent_state_box = {"value": "idle"}
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(event) -> None:
+        _agent_state_box["value"] = event.new_state
+        _emit_desktop_event("state", state=event.new_state)
+
+    _start_speaking_amplitude_pump(lambda: _agent_state_box["value"])
+
+    @session.on("user_state_changed")
+    def _on_user_state(event) -> None:
+        if event.new_state == "speaking":
+            _emit_desktop_event("state", state="listening")
+
+    @session.on("user_input_transcribed")
+    def _on_user_transcript(event) -> None:
+        if event.is_final and event.transcript.strip():
+            text = event.transcript.strip()
+            _emit_desktop_event("chat", role="user", text=text)
+            if _WAKE_PHRASE.search(text):
+                _handle_wake_phrase(text)
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item(event) -> None:
+        item = event.item
+        role = getattr(item, "role", "")
+        text = _chat_message_text(item)
+        if role == "assistant" and text:
+            _emit_desktop_event("chat", role="assistant", text=text)
+
+    @session.on("function_tools_executed")
+    def _on_tools(event) -> None:
+        calls = getattr(event, "function_calls", []) or []
+        outputs = getattr(event, "function_call_outputs", []) or []
+        for index, call in enumerate(calls):
+            name = getattr(call, "name", "tool")
+            arguments = getattr(call, "arguments", "")
+            output = outputs[index] if index < len(outputs) else None
+            detail = str(arguments or "—")
+            if output is not None:
+                detail = f"{detail} · completed"
+            _emit_desktop_event("activity", tool=name, detail=detail[:180], kind="ok")
+
+    @session.on("error")
+    def _on_error(event) -> None:
+        _emit_desktop_event("error", detail=str(getattr(event, "error", event))[:180])
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +533,7 @@ def _endpointing_delay() -> float:
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    clear_events()
     logger.info(
         "FRIDAY online – room: %s | STT=%s | LLM=%s | TTS=%s",
         ctx.room.name, STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER,
@@ -364,6 +546,13 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(
         turn_detection=_turn_detection(),
         min_endpointing_delay=_endpointing_delay(),
+    )
+    _wire_desktop_events(session)
+    _emit_desktop_event(
+        "activity",
+        tool="voice_agent",
+        detail=f"room={ctx.room.name} STT={STT_PROVIDER} LLM={LLM_PROVIDER} TTS={TTS_PROVIDER}",
+        kind="ok",
     )
 
     await session.start(

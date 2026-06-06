@@ -6,7 +6,47 @@ import httpx
 import xml.etree.ElementTree as ET
 import asyncio  # Required for parallel execution
 import re
+import html as _html
 from datetime import datetime
+from urllib.parse import parse_qs, unquote, urlparse
+
+_DDG_ANCHOR = re.compile(
+    r'<a[^>]*class="result__a"[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+    re.DOTALL,
+)
+_DDG_SNIPPET = re.compile(
+    r'class="result__snippet"[^>]*>(?P<snippet>.*?)</a>', re.DOTALL
+)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _clean(text: str) -> str:
+    return _html.unescape(_TAGS.sub("", text)).strip()
+
+
+def _resolve_ddg_link(href: str) -> str:
+    """DuckDuckGo wraps results in /l/?uddg=<encoded-url>. Unwrap it."""
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if parsed.path.endswith("/l/"):
+        params = parse_qs(parsed.query)
+        if "uddg" in params:
+            return unquote(params["uddg"][0])
+    return href
+
+
+def _parse_ddg_html(html: str, limit: int) -> list[tuple[str, str, str]]:
+    anchors = list(_DDG_ANCHOR.finditer(html))
+    snippets = [_clean(m.group("snippet")) for m in _DDG_SNIPPET.finditer(html)]
+    out: list[tuple[str, str, str]] = []
+    for i, match in enumerate(anchors[:limit]):
+        title = _clean(match.group("title"))
+        link = _resolve_ddg_link(match.group("href"))
+        snippet = snippets[i] if i < len(snippets) else ""
+        if title and link:
+            out.append((title, link, snippet))
+    return out
 
 SEED_FEEDS = [
     'https://feeds.bbci.co.uk/news/world/rss.xml',
@@ -113,9 +153,43 @@ def register(mcp):
         return "\n".join(report)
 
     @mcp.tool()
-    async def search_web(query: str) -> str:
-        """Search the web for a given query and return a summary of results."""
-        return f"[stub] Search results for: {query}"
+    async def search_web(query: str, max_results: int = 6) -> str:
+        """
+        Search the web and return the top results (title, URL, snippet).
+        Uses DuckDuckGo's HTML endpoint, so no search API key is required.
+        """
+        max_results = max(1, min(max_results, 15))
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+                response = await client.post(
+                    "https://html.duckduckgo.com/html/",
+                    data={"q": query},
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"
+                        ),
+                        "Accept": "text/html,application/xhtml+xml",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                response.raise_for_status()
+                html = response.text
+        except Exception as exc:
+            return f"Web grid's unreachable right now, boss: {exc}"
+
+        results = _parse_ddg_html(html, max_results)
+        if not results:
+            return f"No results came back for {query!r}, boss."
+
+        report = [f"### WEB SEARCH — {query}\n"]
+        for index, (title, link, snippet) in enumerate(results, 1):
+            report.append(f"{index}. {title}")
+            if snippet:
+                report.append(f"   {snippet}")
+            report.append(f"   {link}\n")
+        return "\n".join(report)
 
     @mcp.tool()
     async def fetch_url(url: str) -> str:

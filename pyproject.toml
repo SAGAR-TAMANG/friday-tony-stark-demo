@@ -10,16 +10,20 @@ dependencies = [
     "livekit-agents[deepgram,groq,openai,sarvam,silero]>=1.5.1",
     "livekit-plugins-google>=1.5.1",
     "openai>=2.30.0",
+    "psutil>=5.9",
+    "pyside6>=6.11.1",
     "python-dotenv",
 ]
 
 [project.scripts]
 friday = "server:main"
 friday_voice = "agent_friday:dev" # Points to the wrapper
+friday_desktop = "friday.desktop.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["server.py"]
+packages = ["friday"]
+py-modules = ["server", "agent_friday", "main"]

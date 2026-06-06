@@ -3,7 +3,19 @@ Tool registry — imports and registers all tool modules with the MCP server.
 Add new tool modules here as you build them.
 """
 
-from friday.tools import desktop, mac_worker, messaging, web, system, utils
+from friday.tools import (
+    desktop,
+    diagnostics,
+    mac_worker,
+    memory,
+    messaging,
+    odysseus,
+    shell,
+    spotify,
+    web,
+    system,
+    utils,
+)
 
 
 def register_all_tools(mcp):
@@ -14,3 +26,8 @@ def register_all_tools(mcp):
     desktop.register(mcp)
     mac_worker.register(mcp)
     messaging.register(mcp)
+    memory.register(mcp)
+    diagnostics.register(mcp)
+    odysseus.register(mcp)
+    shell.register(mcp)
+    spotify.register(mcp)

@@ -41,6 +41,26 @@ class MessagingToolTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             messaging.confirm_pending_action(prepared["action_id"])
 
+    def test_confirm_pending_action_can_use_latest_pending_message(self):
+        first = messaging.prepare_outbound_message(
+            channel="messages",
+            recipient="First",
+            message="Older.",
+        )
+        second = messaging.prepare_outbound_message(
+            channel="messages",
+            recipient="Second",
+            message="Newer.",
+        )
+
+        with patch("friday.tools.messaging._send_apple_message", return_value="sent") as send:
+            result = messaging.confirm_pending_action()
+
+        send.assert_called_once_with("Second", "Newer.")
+        self.assertEqual(result["action_id"], second["action_id"])
+        self.assertIn(first["action_id"], messaging.PENDING_ACTIONS)
+        self.assertNotIn(second["action_id"], messaging.PENDING_ACTIONS)
+
     def test_expired_pending_action_is_rejected(self):
         prepared = messaging.prepare_outbound_message(
             channel="messages",
@@ -94,6 +114,36 @@ class MessagingToolTests(unittest.TestCase):
                     result = messaging.confirm_pending_action(prepared["action_id"])
                 open_url.assert_called()
                 self.assertIn("draft", result["result"].lower())
+
+    def test_messages_contact_name_is_resolved_before_send(self):
+        with (
+            patch("friday.tools.messaging._lookup_contact_handle", return_value="+15551234567") as lookup,
+            patch("friday.tools.messaging._send_messages_handle", return_value="Sent through Apple Messages.") as send,
+        ):
+            result = messaging._send_apple_message("Dhruv", "Testing.")
+
+        lookup.assert_called_once_with("Dhruv")
+        send.assert_called_once_with("+15551234567", "Testing.")
+        self.assertIn("Sent", result)
+
+    def test_messages_send_falls_back_from_imessage_to_sms(self):
+        with patch("friday.tools.messaging._osascript") as run:
+            run.side_effect = [RuntimeError("iMessage failed"), None]
+            result = messaging._send_messages_handle("+15551234567", "Testing.")
+
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("SMS", result)
+
+    def test_messages_send_opens_draft_when_direct_send_fails(self):
+        with (
+            patch("friday.tools.messaging._osascript", side_effect=RuntimeError("send failed")),
+            patch("friday.tools.messaging.webbrowser.open") as open_url,
+        ):
+            result = messaging._send_messages_handle("+15551234567", "Testing.")
+
+        open_url.assert_called_once()
+        self.assertIn("sms:", open_url.call_args.args[0])
+        self.assertIn("Opened Messages draft", result)
 
 
 if __name__ == "__main__":

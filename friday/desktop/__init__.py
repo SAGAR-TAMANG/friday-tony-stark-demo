@@ -1,0 +1,1 @@
+"""FRIDAY — desktop presence."""

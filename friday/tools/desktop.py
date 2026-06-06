@@ -4,7 +4,6 @@ Desktop tools for local browser control, safe file storage, and memory notes.
 
 from __future__ import annotations
 
-import html
 import os
 import re
 import subprocess
@@ -154,48 +153,6 @@ def list_workspace(path: str = ".", limit: int = 80) -> dict:
     return {"path": str(target), "entries": entries}
 
 
-def create_desktop_view() -> dict:
-    root = _configured_workspace_roots()[0]
-    target = resolve_workspace_path(root / "Friday-Desktop-View.html")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    html_doc = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>F.R.I.D.A.Y. Desktop View</title>
-  <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #090b10; color: #f5f7fb; }}
-    main {{ max-width: 920px; margin: 0 auto; padding: 48px 24px; }}
-    h1 {{ font-size: 38px; margin: 0 0 8px; letter-spacing: 0; }}
-    p {{ color: #aeb7c8; line-height: 1.5; }}
-    section {{ border-top: 1px solid #293044; padding: 22px 0; }}
-    ul {{ padding-left: 20px; line-height: 1.8; }}
-    .status {{ color: #7ce7b2; font-weight: 700; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>F.R.I.D.A.Y.</h1>
-    <p class="status">Local desktop bridge online</p>
-    <p>Generated {html.escape(now)} on this Mac.</p>
-    <section>
-      <h2>Enabled Capabilities</h2>
-      <ul>
-        <li>Open websites in the default browser.</li>
-        <li>Open local files and folders inside configured workspace roots.</li>
-        <li>Read, write, append, and list files under WORKSPACE_ROOTS.</li>
-        <li>Store explicit memory notes under OBSIDIAN_VAULT_PATH.</li>
-      </ul>
-    </section>
-  </main>
-</body>
-</html>
-"""
-    target.write_text(html_doc)
-    return {"path": str(target), "url": target.as_uri()}
-
-
 def remember_note(title: str, content: str) -> dict:
     _reject_secret_content(content)
     vault = _vault_path()
@@ -258,13 +215,6 @@ def register(mcp):
             raise FileNotFoundError(f"Path not found: {target}")
         subprocess.run(["open", str(target)], check=False)
         return f"Opened {target} on the desktop."
-
-    @mcp.tool()
-    def open_friday_desktop_view() -> str:
-        """Create and open FRIDAY's local desktop status view."""
-        result = create_desktop_view()
-        webbrowser.open(result["url"])
-        return f"Opened FRIDAY desktop view: {result['path']}"
 
     @mcp.tool()
     def list_workspace_files(path: str = ".", limit: int = 80) -> dict:
