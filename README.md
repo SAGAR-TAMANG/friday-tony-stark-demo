@@ -1,7 +1,3 @@
-Here is the updated README with the official release announcement prominently featured at the top. I kept the formatting clean, scannable, and consistent with your original structure.
-
----
-
 # F.R.I.D.A.Y. — Tony Stark Demo
 
 🎉 **Official Public Release:** F.R.I.D.A.Y. is now officially released to the public as a standalone application! You can easily install it without needing to set up the development environment.
